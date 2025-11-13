@@ -27,10 +27,12 @@ from .kernels import (
     apply_rigid_restitution,
     bending_constraint,
     solve_body_contact_positions,
+        solve_particle_shape_contacts,
     solve_particle_particle_contacts,
     solve_springs,
     solve_tetrahedra,
 )
+from .kernels import perform_shape_matching_kernel
 
 
 class SolverSRXPBD(SolverBase):
@@ -125,6 +127,45 @@ class SolverSRXPBD(SolverBase):
 
         return new_particle_q, new_particle_qd
 
+    def perform_shape_matching(self, model: Model, state_in: State, state_out: State):
+        # if not hasattr(self, "particle_q_init") or self.particle_q_init is None:
+        #     self.particle_q_init = wp.clone(state_in.particle_q)
+
+        
+
+        # Launch device kernel (single-thread) to compute centroids, SVD and apply rigid fit
+        # allocate output array to avoid aliasing input/output on the device
+        new_particle_q = wp.empty_like(state_out.particle_q)
+
+        # debug: report sizes to help diagnose single-particle output
+        try:
+            print(f"[shape_matching] model.particle_count={model.particle_count}, state_out.particle_q_len={len(state_out.particle_q)}")
+        except Exception:
+            pass
+
+        wp.launch(
+            kernel=perform_shape_matching_kernel,
+            dim=1,
+            inputs=[state_out.particle_q, self.particle_q_init, model.particle_inv_mass, model.particle_count],
+            outputs=[new_particle_q],
+            device=model.device,
+        )
+
+        # copy results back into the state's existing array to preserve object identity
+        try:
+            state_out.particle_q.assign(new_particle_q)
+        except Exception:
+            # fallback: replace reference if assign is not available
+            state_out.particle_q = new_particle_q
+
+        try:
+            print(f"[shape_matching] wrote new_particle_q_len={len(state_out.particle_q)}")
+        except Exception:
+            pass
+
+        return
+    
+
     @override
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
         requires_grad = state_in.requires_grad
@@ -154,7 +195,7 @@ class SolverSRXPBD(SolverBase):
                 particle_deltas = wp.empty_like(state_out.particle_qd)
 
                 self.integrate_particles(model, state_in, state_out, dt)
-
+                self.perform_shape_matching(model, state_in, state_out)
 
             spring_constraint_lambdas = None
             if model.spring_count:
@@ -170,6 +211,41 @@ class SolverSRXPBD(SolverBase):
                             particle_deltas = wp.zeros_like(particle_deltas)
                         else:
                             particle_deltas.zero_()
+
+                        # particle-rigid/shape contacts (including ground plane)
+                        if model.shape_count:
+                            wp.launch(
+                                kernel=solve_particle_shape_contacts,
+                                dim=contacts.soft_contact_max,
+                                inputs=[
+                                    particle_q,
+                                    particle_qd,
+                                    model.particle_inv_mass,
+                                    model.particle_radius,
+                                    model.particle_flags,
+                                    state_out.body_q,
+                                    state_out.body_qd,
+                                    model.body_com,
+                                    model.body_inv_mass,
+                                    model.body_inv_inertia,
+                                    model.shape_body,
+                                    model.shape_material_mu,
+                                    model.soft_contact_mu,
+                                    model.particle_adhesion,
+                                    contacts.soft_contact_count,
+                                    contacts.soft_contact_particle,
+                                    contacts.soft_contact_shape,
+                                    contacts.soft_contact_body_pos,
+                                    contacts.soft_contact_body_vel,
+                                    contacts.soft_contact_normal,
+                                    contacts.soft_contact_max,
+                                    dt,
+                                    self.soft_contact_relaxation,
+                                ],
+                                # outputs
+                                outputs=[particle_deltas, body_deltas],
+                                device=model.device,
+                            )
 
                         if model.particle_max_radius > 0.0 and model.particle_count > 1:
                             # assert model.particle_grid.reserved, "model.particle_grid must be built, see HashGrid.build()"

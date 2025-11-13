@@ -112,6 +112,82 @@ def apply_particle_shape_restitution(
 
         wp.atomic_add(particle_v_out, tid, dv)
 
+@wp.kernel
+def perform_shape_matching_kernel(
+    particle_q: wp.array(dtype=wp.vec3),
+    particle_q_init: wp.array(dtype=wp.vec3),
+    particle_inv_mass: wp.array(dtype=float),
+    particle_count: int,
+    particle_q_out: wp.array(dtype=wp.vec3),
+):
+    tid = wp.tid()
+    # single-thread kernel
+    if tid != 0:
+        return
+
+    # compute total weight and centroids
+    tot_w = float(0.0)
+    t = wp.vec3(0.0)
+    t0 = wp.vec3(0.0)
+    for i in range(particle_count):
+        inv = particle_inv_mass[i]
+        w = 1.0 / inv if inv > 0.0 else 0.0
+        p = particle_q[i]
+        q = particle_q_init[i]
+        tot_w += w
+        t += w * p
+        t0 += w * q
+
+    if tot_w == float(0.0):
+        return
+
+    inv_tot = 1.0 / tot_w
+    t = t * inv_tot
+    t0 = t0 * inv_tot
+
+    # covariance A
+    A = wp.mat33(0.0)
+    for i in range(particle_count):
+        inv = particle_inv_mass[i]
+        w = 1.0 / inv if inv > 0.0 else 0.0
+        p = particle_q[i]
+        q = particle_q_init[i]
+        pi = p - t
+        qi = q - t0
+        A += wp.mat33(
+            pi.x * qi.x,
+            pi.x * qi.y,
+            pi.x * qi.z,
+            pi.y * qi.x,
+            pi.y * qi.y,
+            pi.y * qi.z,
+            pi.z * qi.x,
+            pi.z * qi.y,
+            pi.z * qi.z,
+        ) * w
+
+    # polar decomposition via SVD
+    U = wp.mat33()
+    S = wp.vec3()
+    V = wp.mat33()
+    wp.svd3(A, U, S, V)
+
+    R = U @ wp.transpose(V)
+    # ensure proper rotation
+    if wp.determinant(R) < 0.0:
+        # flip last column of U by multiplying with diag(1,1,-1)
+        flip = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0)
+        U = U @ flip
+        R = U @ wp.transpose(V)
+
+    # apply goal positions
+    for i in range(particle_count):
+        q = particle_q_init[i]
+        rel = q - t0
+        # R * rel (mat33 * vec3 is supported via the * operator)
+        g = R * rel + t
+        particle_q_out[i] = g
+
 
 @wp.kernel
 def solve_particle_shape_contacts(
