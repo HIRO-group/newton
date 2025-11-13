@@ -73,26 +73,33 @@ class Example:
         }
 
 
-        builder.add_cloth_grid(**common_params, **solver_params)
+        # builder.add_cloth_grid(**common_params, **solver_params)
 
-        # # BOX
-        # self.box_pos = wp.vec3(0.0, 2.0, drop_z)
-        # body_box = builder.add_body(xform=wp.transform(p=self.box_pos, q=wp.quat_identity()), key="box")
-        # builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
+        N = 4
+        particles_per_cell = 3
+        voxel_size = 0.5
+        particle_spacing = voxel_size / particles_per_cell
+        friction = 0.6
 
-        # # MESH (bunny)
-        # usd_stage = Usd.Stage.Open(newton.examples.get_asset("bunny.usd"))
-        # usd_geom = UsdGeom.Mesh(usd_stage.GetPrimAtPath("/root/bunny"))
-        # mesh_vertices = np.array(usd_geom.GetPointsAttr().Get())
-        # mesh_indices = np.array(usd_geom.GetFaceVertexIndicesAttr().Get())
-        # demo_mesh = newton.Mesh(mesh_vertices, mesh_indices)
-        # self.mesh_pos = wp.vec3(0.0, 4.0, drop_z - 0.5)
-        # body_mesh = builder.add_body(xform=wp.transform(p=self.mesh_pos, q=wp.quat(0.5, 0.5, 0.5, 0.5)), key="mesh")        
-        # builder.add_shape_mesh(body_mesh, mesh=demo_mesh)
+        builder.add_particle_grid(
+            pos=wp.vec3(0.5 * particle_spacing),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0),
+            dim_x=N * particles_per_cell,
+            dim_y=N * particles_per_cell,
+            dim_z=N * particles_per_cell,
+            cell_x=particle_spacing,
+            cell_y=particle_spacing,
+            cell_z=particle_spacing,
+            mass=1.0,
+            jitter=0.0,
+        )
 
-        # finalize model
         self.model = builder.finalize()
 
+        # TODO
+        self.model.particle_ke = 1.0e15
+        self.model.particle_mu = friction
         self.model.soft_contact_ke = 1.0e2
         self.model.soft_contact_kd = 1.0e0
         self.model.soft_contact_mu = 1.0
@@ -197,6 +204,7 @@ class Example:
 if __name__ == "__main__":
     # Parse arguments and initialize viewer
     viewer, args = newton.examples.init()
+    viewer.show_particles = True
 
     # Create viewer and run
     example = Example(viewer)
