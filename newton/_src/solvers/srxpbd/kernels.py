@@ -155,6 +155,10 @@ def perform_shape_matching_kernel(
     wp.svd3(A, U, S, V)
     R = U @ wp.transpose(V)
 
+    if (wp.determinant(R) < 0.0): # TODO
+        U[:,2] = -U[:,2]
+        R = U @ wp.transpose(V) 
+
     # apply goal positions
     for i in range(particle_count):
         x0 = particle_q_init[i]

@@ -29,9 +29,9 @@ import newton.examples
 
 class Example:
     def __init__(self, viewer):
+        self.sim_time = 0.0
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
-        self.sim_time = 0.0
         self.sim_substeps = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.viewer = viewer
@@ -39,7 +39,7 @@ class Example:
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
 
-        drop_z = 2.0        
+        drop_z = 1.0
         N = 2
         particles_per_cell = 3
         voxel_size = 0.5
@@ -47,7 +47,8 @@ class Example:
 
         builder.add_particle_grid(
             pos=wp.vec3(0, 0, drop_z),
-            rot=wp.quat_identity(),
+            # rot=wp.quat_identity(),
+            rot = wp.quat(0.1830127, 0.1830127, 0.6830127, 0.6830127),
             vel=wp.vec3(0.0),
             dim_x=N * particles_per_cell,
             dim_y=N * particles_per_cell,

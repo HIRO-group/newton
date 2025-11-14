@@ -26,8 +26,8 @@ from .kernels import (
     solve_particle_particle_contacts,
     solve_springs,
     solve_tetrahedra,
+    perform_shape_matching_kernel,
 )
-from .kernels import perform_shape_matching_kernel
 
 
 class SolverSRXPBD(SolverBase):
@@ -75,6 +75,7 @@ class SolverSRXPBD(SolverBase):
 
         # helper variables to track constraint resolution vars
         self._particle_delta_counter = 0
+        self.particle_q_rest = model.particle_q
 
     def apply_particle_deltas(
         self,
@@ -132,9 +133,6 @@ class SolverSRXPBD(SolverBase):
         particle_q = None
         particle_qd = None
         particle_deltas = None
-
-        body_q = None
-        body_qd = None
         body_deltas = None
 
         if control is None:
@@ -290,7 +288,7 @@ class SolverSRXPBD(SolverBase):
                                 dim=1,
                                 inputs=[
                                     particle_q,
-                                    self.particle_q_init,
+                                    self.particle_q_rest,
                                     model.particle_mass,
                                     model.particle_count,
                                 ],
