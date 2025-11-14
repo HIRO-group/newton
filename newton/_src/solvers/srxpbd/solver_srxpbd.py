@@ -19,7 +19,6 @@ from ...core.types import override
 from ...sim import Contacts, Control, Model, State
 from ..solver import SolverBase
 from .kernels import (
-    apply_body_deltas,
     apply_particle_deltas,
     apply_particle_shape_restitution,
     bending_constraint,
