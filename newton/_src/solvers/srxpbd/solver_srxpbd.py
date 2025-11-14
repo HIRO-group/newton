@@ -19,15 +19,11 @@ from ...core.types import override
 from ...sim import Contacts, Control, Model, State
 from ..solver import SolverBase
 from .kernels import (
-    apply_body_delta_velocities,
     apply_body_deltas,
-    apply_joint_forces,
     apply_particle_deltas,
     apply_particle_shape_restitution,
-    apply_rigid_restitution,
     bending_constraint,
-    solve_body_contact_positions,
-        solve_particle_shape_contacts,
+    solve_particle_shape_contacts,
     solve_particle_particle_contacts,
     solve_springs,
     solve_tetrahedra,
@@ -127,45 +123,6 @@ class SolverSRXPBD(SolverBase):
 
         return new_particle_q, new_particle_qd
 
-    def perform_shape_matching(self, model: Model, state_in: State, state_out: State):
-        # if not hasattr(self, "particle_q_init") or self.particle_q_init is None:
-        #     self.particle_q_init = wp.clone(state_in.particle_q)
-
-        
-
-        # Launch device kernel (single-thread) to compute centroids, SVD and apply rigid fit
-        # allocate output array to avoid aliasing input/output on the device
-        new_particle_q = wp.empty_like(state_out.particle_q)
-
-        # debug: report sizes to help diagnose single-particle output
-        try:
-            print(f"[shape_matching] model.particle_count={model.particle_count}, state_out.particle_q_len={len(state_out.particle_q)}")
-        except Exception:
-            pass
-
-        wp.launch(
-            kernel=perform_shape_matching_kernel,
-            dim=1,
-            inputs=[state_out.particle_q, self.particle_q_init, model.particle_inv_mass, model.particle_count],
-            outputs=[new_particle_q],
-            device=model.device,
-        )
-
-        # copy results back into the state's existing array to preserve object identity
-        try:
-            state_out.particle_q.assign(new_particle_q)
-        except Exception:
-            # fallback: replace reference if assign is not available
-            state_out.particle_q = new_particle_q
-
-        try:
-            print(f"[shape_matching] wrote new_particle_q_len={len(state_out.particle_q)}")
-        except Exception:
-            pass
-
-        return
-    
-
     @override
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
         requires_grad = state_in.requires_grad
@@ -193,9 +150,7 @@ class SolverSRXPBD(SolverBase):
                 if self.enable_restitution:
                     self.particle_qd_init = wp.clone(state_in.particle_qd)
                 particle_deltas = wp.empty_like(state_out.particle_qd)
-
                 self.integrate_particles(model, state_in, state_out, dt)
-                self.perform_shape_matching(model, state_in, state_out)
 
             spring_constraint_lambdas = None
             if model.spring_count:
@@ -248,7 +203,6 @@ class SolverSRXPBD(SolverBase):
                             )
 
                         if model.particle_max_radius > 0.0 and model.particle_count > 1:
-                            # assert model.particle_grid.reserved, "model.particle_grid must be built, see HashGrid.build()"
                             wp.launch(
                                 kernel=solve_particle_particle_contacts,
                                 dim=model.particle_count,
@@ -325,6 +279,21 @@ class SolverSRXPBD(SolverBase):
                                     model.tet_materials,
                                     dt,
                                     self.soft_body_relaxation,
+                                ],
+                                outputs=[particle_deltas],
+                                device=model.device,
+                            )
+
+                        # shape matching
+                        if model.particle_count:
+                            wp.launch(
+                                kernel=perform_shape_matching_kernel,
+                                dim=1,
+                                inputs=[
+                                    particle_q,
+                                    self.particle_q_init,
+                                    model.particle_mass,
+                                    model.particle_count,
                                 ],
                                 outputs=[particle_deltas],
                                 device=model.device,
