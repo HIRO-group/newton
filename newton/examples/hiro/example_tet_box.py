@@ -22,6 +22,7 @@
 # Command: python -m newton.examples basic_shapes
 #
 ###########################################################################
+from _src.sim import builder
 import warp as wp
 import newton
 import newton.examples
@@ -39,26 +40,20 @@ class Example:
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
 
-        drop_z = 1.0
-        N = 2
-        particles_per_cell = 3
-        voxel_size = 0.5
-        particle_spacing = voxel_size / particles_per_cell
 
-        builder.add_particle_grid(
-            pos=wp.vec3(0, 0, drop_z),
-            # rot=wp.quat_identity(),
-            rot = wp.quat(0.1830127, 0.1830127, 0.6830127, 0.6830127),
-            vel=wp.vec3(0.0),
-            dim_x=N * particles_per_cell,
-            dim_y=N * particles_per_cell,
-            dim_z=N * particles_per_cell,
-            cell_x=particle_spacing,
-            cell_y=particle_spacing,
-            cell_z=particle_spacing,
-            mass=1.0,
-            jitter=0.0,
-        )
+        drop_z = 2.0
+        N = 2
+        voxel_size = 0.5
+
+        size = N * voxel_size
+        half_extents = wp.vec3(0.5 * size)
+        mass = 216.0
+
+        self.box_pos = wp.vec3(0.0, 2.0, drop_z)
+
+        rot = wp.quat(0.1830127, 0.1830127, 0.6830127, 0.6830127)
+        body_box = builder.add_body(mass=mass, xform=wp.transform(p=self.box_pos, q=rot), key="box")
+        builder.add_shape_box(body_box, hx=half_extents.x, hy=half_extents.y, hz=half_extents.z)
 
         self.model = builder.finalize()
 
@@ -69,7 +64,7 @@ class Example:
         # self.model.soft_contact_kd = 1.0e0
         # self.model.soft_contact_mu = 1.0
 
-        self.solver = newton.solvers.SolverSRXPBD(self.model, iterations=10)
+        self.solver = newton.solvers.SolverXPBD(self.model, iterations=10)
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
