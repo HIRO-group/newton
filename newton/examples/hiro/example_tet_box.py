@@ -22,7 +22,7 @@
 # Command: python -m newton.examples basic_shapes
 #
 ###########################################################################
-from _src.sim import builder
+
 import warp as wp
 import newton
 import newton.examples
