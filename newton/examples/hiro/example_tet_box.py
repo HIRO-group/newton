@@ -22,7 +22,7 @@
 # Command: uv run -m newton.examples X_basic_shape
 # if having issues with OpenGL on WSL2, try setting the environment variable PYOPENGL_PLATFORM=glx
 ###########################################################################
-from _src.sim import builder
+
 import warp as wp
 import newton
 import newton.examples
