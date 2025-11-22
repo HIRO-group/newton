@@ -3736,9 +3736,7 @@ class ModelBuilder:
         pos: Vec3 | None = None,
         rot: Quat | None = None,
         vel: Vec3 | None = None,
-        mass: float = 1.0,
-        jitter: float = 0.0,
-        radius_std: float = 0.0,
+        total_mass: float = 1.0,
     ):
         """
         Adds particles to fill a volume defined by a union of spheres from JSON data.
@@ -3767,13 +3765,8 @@ class ModelBuilder:
                 If None, uses (0, 0, 0). Defaults to None.
             cell_size (float): The spacing between particles in the grid. Smaller values
                 create denser particle distributions. Defaults to 0.05.
-            mass (float): Mass to assign to each particle. Defaults to 1.0.
-                # TODO: Do we want to specify mass for each particle?
-            jitter (float): Maximum random offset to apply to each particle position.
-                Defaults to 0.0 (no jitter).
-            radius_std (float, optional): Standard deviation for particle radii. If > 0,
-                radii are sampled from a normal distribution. Defaults to 0.0.
-                # TODO: Is this relevant for morphit spheres or can we remove it?
+            total_mass (float): Total mass of the volume. Defaults to 1.0. Each particle's mass is derived from 
+                this total mass using its radius
 
         Returns:
             None
@@ -3806,6 +3799,13 @@ class ModelBuilder:
         centers = np.array(data["centers"], dtype=np.float32)
         radii = np.array(data["radii"], dtype=np.float32)
 
+        # Calculate the total volume of all particles
+        volumes = (4.0 / 3.0) * np.pi * (radii ** 3)
+        total_volume = np.sum(volumes)
+
+        if total_volume <= 0:
+            raise ValueError(f"Total volume of all spheres cannot be 0")
+
         if len(centers) != len(radii):
             raise ValueError(f"Mismatch between number of centers ({len(centers)}) and radii ({len(radii)})")
 
@@ -3830,24 +3830,18 @@ class ModelBuilder:
 
         for point, radius in zip(centers, radii):
             
+            # Calculate the mass of this particle based on it's volume relative
+            # to the total volume
+            particle_volume = 4.0 / 3.0 * np.pi * (radius ** 3)
+            mass = total_mass * (particle_volume / total_volume)
+
             # Convert to wp.vec3
             point_vec = wp.vec3(*point)
 
             # Apply rotation and position offset
             point_rotated_and_offset = wp.quat_rotate(rot, point_vec) + pos
 
-            # Apply jitter if specified
-            if jitter > 0.0:
-                point_rotated_and_offset = point_rotated_and_offset + wp.vec3(rng.random(3) * jitter)
-
-            # Sample particle radius
-            if radius_std > 0.0:
-                r = radius + rng.standard_normal() * radius_std
-                r = max(0.0, r)  # Ensure non-negative
-            else:
-                r = radius
-
-            self.add_particle(point_rotated_and_offset, vel, mass, r)
+            self.add_particle(point_rotated_and_offset, vel, mass, radius)
 
 
     def add_soft_grid(
