@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import ctypes
+import json
 import math
 import warnings
 from dataclasses import dataclass
@@ -3728,6 +3729,126 @@ class ModelBuilder:
                     else:
                         r = radius_mean
                     self.add_particle(p, vel, m, r)
+
+    def add_particle_volume(
+        self,
+        volume_data: str | dict[str, Any],
+        pos: Vec3 | None = None,
+        rot: Quat | None = None,
+        vel: Vec3 | None = None,
+        mass: float = 1.0,
+        jitter: float = 0.0,
+        radius_std: float = 0.0,
+    ):
+        """
+        Adds particles to fill a volume defined by a union of spheres from JSON data.
+
+        This helper function creates particles that fill the volume defined by a collection
+        of spheres specified in a JSON file or dictionary. The JSON format should contain:
+        - "centers": A list of 3D center points [x, y, z] for each sphere
+        - "radii": A list of radii corresponding to each center
+
+        The function automatically computes a bounding box covering all spheres, creates
+        a grid of candidate particles, and filters to only include particles that lie
+        within at least one sphere.
+
+        Args:
+            volume_data (str | dict): Either a file path to a JSON file (e.g. a MorphIt output file),
+            or a dictionary containing "centers" and "radii" keys. The dictionary format should be:
+                {
+                    "centers": [[x1, y1, z1], [x2, y2, z2], ...],
+                    "radii": [r1, r2, ...]
+                }
+            pos (Vec3, optional): The world-space position of the origin
+                If None, uses (0, 0, 0). Defaults to None.
+            rot (Quat, optional): The rotation to apply to the volume (as a quaternion).
+                If None, uses identity rotation. Defaults to None.
+            vel (Vec3, optional): The initial velocity to assign to each particle.
+                If None, uses (0, 0, 0). Defaults to None.
+            cell_size (float): The spacing between particles in the grid. Smaller values
+                create denser particle distributions. Defaults to 0.05.
+            mass (float): Mass to assign to each particle. Defaults to 1.0.
+                # TODO: Do we want to specify mass for each particle?
+            jitter (float): Maximum random offset to apply to each particle position.
+                Defaults to 0.0 (no jitter).
+            radius_std (float, optional): Standard deviation for particle radii. If > 0,
+                radii are sampled from a normal distribution. Defaults to 0.0.
+                # TODO: Is this relevant for morphit spheres or can we remove it?
+
+        Returns:
+            None
+
+        Example:
+            .. code-block:: python
+
+                builder = ModelBuilder()
+                # Using a JSON file
+                num_particles = builder.add_particle_volume(
+                    "volume.json",
+                    pos=(0, 0, 0),
+                    cell_size=0.02,
+                    mass=0.1
+                )
+                # Or using a dictionary directly
+                volume_dict = {
+                    "centers": [[0, 0, 0], [1, 0, 0]],
+                    "radii": [0.5, 0.3]
+                }
+                num_particles = builder.add_particle_volume(volume_dict)
+        """
+        # Parse JSON data
+        if isinstance(volume_data, str):
+            with open(volume_data, "r") as f:
+                data = json.load(f)
+        else:
+            data = volume_data
+
+        centers = np.array(data["centers"], dtype=np.float32)
+        radii = np.array(data["radii"], dtype=np.float32)
+
+        if len(centers) != len(radii):
+            raise ValueError(f"Mismatch between number of centers ({len(centers)}) and radii ({len(radii)})")
+
+        if len(centers) == 0:
+            return 0
+
+        # Set defaults
+        if pos is None:
+            pos = wp.vec3(0.0, 0.0, 0.0)
+        else:
+            pos = wp.vec3(*pos)
+        if rot is None:
+            rot = wp.quat_identity(float)
+        if vel is None:
+            vel = wp.vec3(0.0, 0.0, 0.0)
+        else:
+            vel = wp.vec3(*vel)
+
+        # Add particles
+        rng = np.random.default_rng(42)
+        # num_added = 0
+
+        for point, radius in zip(centers, radii):
+            
+            # Convert to wp.vec3
+            point_vec = wp.vec3(*point)
+
+            # Apply rotation and position offset
+            point_rotated_and_offset = wp.quat_rotate(rot, point_vec) + pos
+
+            # Apply jitter if specified
+            if jitter > 0.0:
+                point_rotated_and_offset = point_rotated_and_offset + wp.vec3(rng.random(3) * jitter)
+
+            # Sample particle radius
+            if radius_std > 0.0:
+                r = radius + rng.standard_normal() * radius_std
+                r = max(0.0, r)  # Ensure non-negative
+            else:
+                r = radius
+
+            self.add_particle(point_rotated_and_offset, vel, mass, r)
+
 
     def add_soft_grid(
         self,

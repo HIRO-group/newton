@@ -19,8 +19,8 @@
 # Shows how to programmatically creates a variety of
 # collision shapes using the newton.ModelBuilder() API.
 #
-# Command: python -m newton.examples basic_shapes
-#
+# Command: uv run -m newton.examples X_basic_shape
+# if having issues with OpenGL on WSL2, try setting the environment variable PYOPENGL_PLATFORM=glx
 ###########################################################################
 import warp as wp
 import newton
@@ -45,19 +45,43 @@ class Example:
         voxel_size = 0.5
         particle_spacing = voxel_size / particles_per_cell
 
-        builder.add_particle_grid(
+        # builder.add_particle_grid(
+        #     pos=wp.vec3(0, 0, drop_z),
+        #     # rot=wp.quat_identity(),
+        #     rot = wp.quat(0.1830127, 0.1830127, 0.6830127, 0.6830127),
+        #     vel=wp.vec3(0.0),
+        #     dim_x=N * particles_per_cell,
+        #     dim_y=N * particles_per_cell,
+        #     dim_z=N * particles_per_cell,
+        #     cell_x=particle_spacing,
+        #     cell_y=particle_spacing,
+        #     cell_z=particle_spacing,
+        #     mass=1.0,
+        #     jitter=0.0,
+        # )
+
+        # Test using example from MorphIt/src/main.py using pink_box.obj as the input and num_spheres=100
+        # morphit_spheres = "/home/joe/workspace/Particles/MorphIt-1/src/results/output/morphit_results.json"
+
+
+        # Alternatively, can test by manually defining sphere data
+        morphit_spheres = {
+            "centers": [[0, 0, 0], [1, 0, 0], [1, 1, 0], [1, 1, 1], [0, 1, 0], [0, 0, 1], [1, 0, 1], [0, 1, 1], [0.5, 0.5, 0.5]],
+            "radii": [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.3]
+        }
+
+        builder.add_particle_volume(
+            volume_data=morphit_spheres,
             pos=wp.vec3(0, 0, drop_z),
             # rot=wp.quat_identity(),
             rot = wp.quat(0.1830127, 0.1830127, 0.6830127, 0.6830127),
             vel=wp.vec3(0.0),
-            dim_x=N * particles_per_cell,
-            dim_y=N * particles_per_cell,
-            dim_z=N * particles_per_cell,
-            cell_x=particle_spacing,
-            cell_y=particle_spacing,
-            cell_z=particle_spacing,
+            # TODO: Need to discuss how to assign mass to particles
             mass=1.0,
+            # TODO: is this relevant?
             jitter=0.0,
+            # TODO: is this relevant?
+            radius_std=0.0
         )
 
         self.model = builder.finalize()
