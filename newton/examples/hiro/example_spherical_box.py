@@ -38,25 +38,29 @@ class Example:
 
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
-
         drop_z = 1.0
+
         N = 2
         particles_per_cell = 3
+        dim_x = N * particles_per_cell
+        dim_y = N * particles_per_cell
+        dim_z = N * particles_per_cell
         voxel_size = 0.5
         particle_spacing = voxel_size / particles_per_cell
+        total_mass = 216.0
+        mass_per_particle = total_mass / (dim_x * dim_y * dim_z)
 
         builder.add_particle_grid(
             pos=wp.vec3(0, 0, drop_z),
-            # rot=wp.quat_identity(),
             rot = wp.quat(0.1830127, 0.1830127, 0.6830127, 0.6830127),
             vel=wp.vec3(0.0),
-            dim_x=N * particles_per_cell,
-            dim_y=N * particles_per_cell,
-            dim_z=N * particles_per_cell,
+            dim_x=dim_x,
+            dim_y=dim_y,
+            dim_z=dim_z,
             cell_x=particle_spacing,
             cell_y=particle_spacing,
             cell_z=particle_spacing,
-            mass=1.0,
+            mass=mass_per_particle,
             jitter=0.0,
         )
 
