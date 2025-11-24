@@ -52,24 +52,17 @@ class Example:
 
         builder.add_particle_grid(
             pos=wp.vec3(0, 0, drop_z),
-            rot=wp.quat_identity(),
-            # rot = wp.quat(0.1830127, 0.1830127, 0.6830127, 0.6830127),
+            rot = wp.quat(0.1830127, 0.1830127, 0.6830127, 0.6830127),
             vel=wp.vec3(0.0),
             dim_x=dim_x,
             dim_y=dim_y,
             dim_z=dim_z,
-            cell_x=particle_spacing, # 0.16
+            cell_x=particle_spacing,
             cell_y=particle_spacing,
             cell_z=particle_spacing,
             mass=mass_per_particle,
             jitter=0.0,
         )
-
-        size = N * voxel_size
-        half_extents = wp.vec3(0.5 * size)
-        self.box_pos = wp.vec3(0.0, 2.0, drop_z)
-        body_box = builder.add_body(xform=wp.transform(p=self.box_pos, q=wp.quat_identity()), key="box")
-        builder.add_shape_box(body_box, hx=half_extents.x, hy=half_extents.y, hz=half_extents.z)
 
         self.model = builder.finalize()
 
