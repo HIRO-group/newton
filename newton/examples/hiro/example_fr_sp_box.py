@@ -1,39 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-###########################################################################
-# Example Simple Franka
-#
-# This simulation just loads a Franka arm and drives it by manually
-# setting joint_qd every step (no cloth, no Jacobian control).
-#
-# Command: python -m newton.examples simple_franka
-#
-###########################################################################
 
 from __future__ import annotations
 
 import numpy as np
-from newton._src.solvers.style3d import builder
 import warp as wp
 
 import newton
 import newton.examples
 import newton.utils
 from newton import ModelBuilder, State, eval_fk
-from newton.solvers import SolverFeatherstone
 
 
 class Example:
@@ -48,7 +24,7 @@ class Example:
         particle_spacing = voxel_size / particles_per_cell
         scene.add_particle_grid(
             pos=wp.vec3(0.0, -0.3, drop_z),
-            rot = wp.quat_identity(),
+            rot=wp.quat_identity(),
             vel=wp.vec3(0.0),
             dim_x=dim_x,
             dim_y=dim_y,
@@ -77,7 +53,6 @@ class Example:
         # ---------- Robot ----------
         franka = ModelBuilder()
         self.create_articulation(franka)
-
         self.scene.add_builder(franka)
 
         # ---------- Table ----------
@@ -91,7 +66,8 @@ class Example:
             hy=0.4,
             hz=0.1,
         )
-        # ---------- Box ----------
+        
+        # ---------- Particle Box ----------
         self.scene = self.add_particle_box(self.scene)
 
         # ---------- Ground ----------
@@ -105,16 +81,19 @@ class Example:
 
         self.control = self.model.control()
 
-        self.robot_solver = SolverFeatherstone(self.model, update_mass_matrix_interval=self.sim_substeps)
-        self.box_solver = newton.solvers.SolverSRXPBD(self.model, iterations=self.sim_substeps)
+        # Initialize solvers
+        self.robot_solver = newton.solvers.SolverFeatherstone(self.model, update_mass_matrix_interval=self.sim_substeps)
+        self.particle_solver = newton.solvers.SolverSRXPBD(
+            self.model, 
+            iterations=self.sim_substeps,
+        )
 
         self.viewer.set_model(self.model)
-        
-        # gravity in m/s^2
+
         self.gravity_zero = wp.zeros(1, dtype=wp.vec3)
         self.gravity_earth = wp.array(wp.vec3(0.0, 0.0, -9.81), dtype=wp.vec3)
+        
         eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
-
 
     def create_articulation(self, builder: ModelBuilder):
         asset_path = newton.utils.download_asset("franka_emika_panda")
@@ -125,22 +104,21 @@ class Example:
                 wp.quat_identity(),
             ),
             floating=False,
-            scale=1,  # unit: meters
+            scale=1,
             enable_self_collisions=False,
             collapse_fixed_joints=True,
             force_show_colliders=False,
         )
-        # builder.joint_q[:6] = [0.0, 0.0, 0.0, -1.59695, 0.0, 2.5307]
         builder.joint_q[:9] = [
             0.0,
-        -0.785398,
+            -0.785398,
             -1.0,
-        -2.356194,
+            -2.356194,
             0.0,
             1.570796,
             0.785398,
-            0.04,       # finger 1
-            0.04,       # finger 2
+            0.04,  # finger 1
+            0.04,  # finger 2
         ]
 
     def step(self):
@@ -165,17 +143,15 @@ class Example:
             particle_count = self.model.particle_count
             self.model.particle_count = 0
             self.model.gravity.assign(self.gravity_zero)
-
-            self.contacts = self.model.collide(self.state_0)
-
-            self.robot_solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            self.robot_solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
+            self.state_0.particle_f.zero_()
             self.model.particle_count = particle_count
             self.model.gravity.assign(self.gravity_earth)
 
-            # self.box_solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            self.contacts = self.model.collide(self.state_0)
+            self.particle_solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             self.state_0, self.state_1 = self.state_1, self.state_0
-
             self.sim_time += self.sim_dt
 
     def render(self):
@@ -187,7 +163,6 @@ class Example:
         self.viewer.end_frame()
 
     def test(self):
-        # Just a simple sanity check on body velocities
         newton.examples.test_body_state(
             self.model,
             self.state_0,
@@ -197,11 +172,9 @@ class Example:
 
 
 if __name__ == "__main__":
-    # Parse arguments and initialize viewer
     parser = newton.examples.create_parser()
     parser.set_defaults(num_frames=1000)
     viewer, args = newton.examples.init(parser)
     viewer.show_particles = True
-    # Create example and run
     example = Example(viewer)
     newton.examples.run(example, args)
