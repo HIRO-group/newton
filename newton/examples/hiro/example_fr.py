@@ -105,7 +105,7 @@ class Example:
         builder.joint_q[:9] = [
             0.0,
         -0.785398,
-            0.0,
+            -1.0,
         -2.356194,
             0.0,
             1.570796,
@@ -130,6 +130,7 @@ class Example:
             t = self.sim_time
             qd[:] = 0.0
             qd[0] = 0.5 * np.sin(t)
+            qd[1] = 0.5 * np.sin(t)
             self.state_0.joint_qd.assign(qd)
             # -----------------------------------------------
 
@@ -137,7 +138,9 @@ class Example:
             self.model.particle_count = 0
             self.model.gravity.assign(self.gravity_zero)
 
-            self.robot_solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
+            self.contacts = self.model.collide(self.state_0)
+
+            self.robot_solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             self.model.particle_count = particle_count
             self.model.gravity.assign(self.gravity_earth)
