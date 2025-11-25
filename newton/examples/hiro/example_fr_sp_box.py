@@ -23,7 +23,7 @@ class Example:
         voxel_size = 0.1
         particle_spacing = voxel_size / particles_per_cell
         scene.add_particle_grid(
-            pos=wp.vec3(0.0, -0.3, drop_z),
+            pos=wp.vec3(-0.2, -0.7, drop_z),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0),
             dim_x=dim_x,
@@ -80,6 +80,17 @@ class Example:
         self.state_1: State = self.model.state()
 
         self.control = self.model.control()
+
+        # TODO
+        # self.model.particle_ke = 1.0e4
+        # self.model.particle_kd = 0.0
+        # self.model.particle_kf = 0.0
+        # self.model.particle_mu = 0.5
+        # self.model.particle_adhesion = 0.0
+        # self.model.soft_contact_ke = 1.0e2
+        # self.model.soft_contact_kd = 1.0
+        # self.model.soft_contact_kf = 0.0
+        # self.model.soft_contact_mu = 0.5
 
         # Initialize solvers
         self.robot_solver = newton.solvers.SolverFeatherstone(self.model, update_mass_matrix_interval=self.sim_substeps)
@@ -142,13 +153,14 @@ class Example:
 
             particle_count = self.model.particle_count
             self.model.particle_count = 0
+
             self.model.gravity.assign(self.gravity_zero)
             self.robot_solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
             self.state_0.particle_f.zero_()
             self.model.particle_count = particle_count
             self.model.gravity.assign(self.gravity_earth)
 
-            self.contacts = self.model.collide(self.state_0)
+            self.contacts = self.model.collide(self.state_0) # TODO: why state_0?
             self.particle_solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             self.state_0, self.state_1 = self.state_1, self.state_0
@@ -176,5 +188,8 @@ if __name__ == "__main__":
     parser.set_defaults(num_frames=1000)
     viewer, args = newton.examples.init(parser)
     viewer.show_particles = True
+    # wp.config.debug = True
     example = Example(viewer)
     newton.examples.run(example, args)
+
+# WARP_BACKTRACE=1 PYTHONFAULTHANDLER=1 uv run -m newton.examples fr_sp_box

@@ -148,7 +148,12 @@ class SolverSRXPBD(SolverBase):
                     self.particle_qd_init = wp.clone(state_in.particle_qd)
                 particle_deltas = wp.empty_like(state_out.particle_qd)
                 self.integrate_particles(model, state_in, state_out, dt)
-
+            
+            if model.body_count:
+                body_q = state_out.body_q
+                body_qd = state_out.body_qd
+                body_deltas = wp.empty_like(state_out.body_qd)
+        
             spring_constraint_lambdas = None
             if model.spring_count:
                 spring_constraint_lambdas = wp.empty_like(model.spring_rest_length)
