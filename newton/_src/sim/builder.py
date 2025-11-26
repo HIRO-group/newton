@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import ctypes
+import json
 import math
 import warnings
 from dataclasses import dataclass
@@ -3728,6 +3729,120 @@ class ModelBuilder:
                     else:
                         r = radius_mean
                     self.add_particle(p, vel, m, r)
+
+    def add_particle_volume(
+        self,
+        volume_data: str | dict[str, Any],
+        pos: Vec3 | None = None,
+        rot: Quat | None = None,
+        vel: Vec3 | None = None,
+        total_mass: float = 1.0,
+    ):
+        """
+        Adds particles to fill a volume defined by a union of spheres from JSON data.
+
+        This helper function creates particles that fill the volume defined by a collection
+        of spheres specified in a JSON file or dictionary. The JSON format should contain:
+        - "centers": A list of 3D center points [x, y, z] for each sphere
+        - "radii": A list of radii corresponding to each center
+
+        The function automatically computes a bounding box covering all spheres, creates
+        a grid of candidate particles, and filters to only include particles that lie
+        within at least one sphere.
+
+        Args:
+            volume_data (str | dict): Either a file path to a JSON file (e.g. a MorphIt output file),
+            or a dictionary containing "centers" and "radii" keys. The dictionary format should be:
+                {
+                    "centers": [[x1, y1, z1], [x2, y2, z2], ...],
+                    "radii": [r1, r2, ...]
+                }
+            pos (Vec3, optional): The world-space position of the origin
+                If None, uses (0, 0, 0). Defaults to None.
+            rot (Quat, optional): The rotation to apply to the volume (as a quaternion).
+                If None, uses identity rotation. Defaults to None.
+            vel (Vec3, optional): The initial velocity to assign to each particle.
+                If None, uses (0, 0, 0). Defaults to None.
+            cell_size (float): The spacing between particles in the grid. Smaller values
+                create denser particle distributions. Defaults to 0.05.
+            total_mass (float): Total mass of the volume. Defaults to 1.0. Each particle's mass is derived from 
+                this total mass using its radius
+
+        Returns:
+            None
+
+        Example:
+            .. code-block:: python
+
+                builder = ModelBuilder()
+                # Using a JSON file
+                num_particles = builder.add_particle_volume(
+                    "volume.json",
+                    pos=(0, 0, 0),
+                    cell_size=0.02,
+                    mass=0.1
+                )
+                # Or using a dictionary directly
+                volume_dict = {
+                    "centers": [[0, 0, 0], [1, 0, 0]],
+                    "radii": [0.5, 0.3]
+                }
+                num_particles = builder.add_particle_volume(volume_dict)
+        """
+        # Parse JSON data
+        if isinstance(volume_data, str):
+            with open(volume_data, "r") as f:
+                data = json.load(f)
+        else:
+            data = volume_data
+
+        centers = np.array(data["centers"], dtype=np.float32)
+        radii = np.array(data["radii"], dtype=np.float32)
+
+        # Calculate the total volume of all particles
+        volumes = (4.0 / 3.0) * np.pi * (radii ** 3)
+        total_volume = np.sum(volumes)
+
+        if total_volume <= 0:
+            raise ValueError(f"Total volume of all spheres cannot be 0")
+
+        if len(centers) != len(radii):
+            raise ValueError(f"Mismatch between number of centers ({len(centers)}) and radii ({len(radii)})")
+
+        if len(centers) == 0:
+            return 0
+
+        # Set defaults
+        if pos is None:
+            pos = wp.vec3(0.0, 0.0, 0.0)
+        else:
+            pos = wp.vec3(*pos)
+        if rot is None:
+            rot = wp.quat_identity(float)
+        if vel is None:
+            vel = wp.vec3(0.0, 0.0, 0.0)
+        else:
+            vel = wp.vec3(*vel)
+
+        # Add particles
+        rng = np.random.default_rng(42)
+        # num_added = 0
+
+        for point, radius in zip(centers, radii):
+            
+            # Calculate the mass of this particle based on it's volume relative
+            # to the total volume
+            particle_volume = 4.0 / 3.0 * np.pi * (radius ** 3)
+            mass = total_mass * (particle_volume / total_volume)
+
+            # Convert to wp.vec3
+            point_vec = wp.vec3(*point)
+
+            # Apply rotation and position offset
+            point_rotated_and_offset = wp.quat_rotate(rot, point_vec) + pos
+
+            self.add_particle(point_rotated_and_offset, vel, mass, radius)
+
 
     def add_soft_grid(
         self,
