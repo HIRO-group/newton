@@ -20,8 +20,8 @@ wp.config.quiet = True
 
 import newton
 
-from newton.examples.hiro.example_spherical_box import Example as SphereE
-from newton.examples.hiro.example_tet_box import Example as TetBox
+from newton.examples.hiro.example_fr_sp_box import Example as SphereE
+from newton.examples.hiro.example_fr_tet_box import Example as TetBox
 
 
 class SRXPBD:

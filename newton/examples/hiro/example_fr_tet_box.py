@@ -13,31 +13,33 @@ from newton import ModelBuilder, State, eval_fk
 
 
 class Example:
-    def add_particle_box(self, scene):
+
+    def add_tet_box(self, scene):
         drop_z = 0.3
         N = 1
         particles_per_cell = 2
-        dim_x = N * particles_per_cell
-        dim_y = N * particles_per_cell
-        dim_z = N * particles_per_cell
+        dim_x = dim_y = dim_z = N * particles_per_cell
         voxel_size = 0.1
         particle_spacing = voxel_size / particles_per_cell
-        scene.add_particle_grid(
-            pos=wp.vec3(-0.2, -0.7, drop_z),
-            rot=wp.quat_identity(),
-            vel=wp.vec3(0.0),
-            dim_x=dim_x,
-            dim_y=dim_y,
-            dim_z=dim_z,
-            cell_x=particle_spacing,
-            cell_y=particle_spacing,
-            cell_z=particle_spacing,
-            mass=1,
-            jitter=0.0,
-            radius_mean=0.05
-        )
-        return scene
+        radius = 0.05
+        half_extent = 0.5 * ((dim_x - 1) * particle_spacing + 2.0 * radius)
+        box_center = wp.vec3(-0.2, -0.7, 0.3)
 
+        mass = 4.0
+        body_box = scene.add_body(
+            mass=mass,
+            xform=wp.transform(p=box_center, q=wp.quat_identity()),
+            key="box",
+        )
+
+        scene.add_shape_box(
+            body_box,
+            hx=half_extent,
+            hy=half_extent,
+            hz=half_extent,
+    )
+        return scene
+    
     def __init__(self, viewer):
         # simulation params
         self.sim_substeps = 15
@@ -66,9 +68,9 @@ class Example:
             hy=0.4,
             hz=0.1,
         )
-        
+
         # ---------- Particle Box ----------
-        self.scene = self.add_particle_box(self.scene)
+        self.scene = self.add_tet_box(self.scene)
 
         # ---------- Ground ----------
         self.scene.add_ground_plane()
@@ -94,7 +96,7 @@ class Example:
 
         # Initialize solvers
         self.robot_solver = newton.solvers.SolverFeatherstone(self.model, update_mass_matrix_interval=self.sim_substeps)
-        self.particle_solver = newton.solvers.SolverSRXPBD(
+        self.particle_solver = newton.solvers.SolverXPBD(
             self.model, 
             iterations=self.sim_substeps,
         )
@@ -156,7 +158,7 @@ class Example:
 
             self.model.gravity.assign(self.gravity_zero)
             self.robot_solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
-            self.state_0.particle_f.zero_()
+            # self.state_0.particle_f.zero_()
             self.model.particle_count = particle_count
             self.model.gravity.assign(self.gravity_earth)
 
