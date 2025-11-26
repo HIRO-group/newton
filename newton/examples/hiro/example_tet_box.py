@@ -19,8 +19,8 @@
 # Shows how to programmatically creates a variety of
 # collision shapes using the newton.ModelBuilder() API.
 #
-# Command: uv run -m newton.examples X_basic_shape
-# if having issues with OpenGL on WSL2, try setting the environment variable PYOPENGL_PLATFORM=glx
+# Command: python -m newton.examples basic_shapes
+#
 ###########################################################################
 
 import warp as wp
