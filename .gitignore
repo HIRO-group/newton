@@ -44,3 +44,4 @@ MUJOCO_LOG.TXT
 imgui.ini
 newton/tests/outputs/
 newton/examples/assets/hiro/
+newton/examples/hiro/*.png
