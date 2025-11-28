@@ -34,18 +34,37 @@ class Box:
     @staticmethod
     def get_tr_urdf(builder):
         urdf_path = 'newton/examples/assets/hiro/urdfs/pink_box/pink_box.urdf'
+        shape_idx_start = len(builder.shape_type)
         builder.add_urdf(urdf_path, xform=wp.transform(p=Box.pos, q=Box.rot),
-                        floating=True, ignore_inertial_definitions=True,
-                        scale=1.0)
+                         floating=True,
+                         ignore_inertial_definitions=True,
+                         scale=3.0)  # Adds two mesh: visual + collision
+        shape_idx_end = len(builder.shape_type)
+        for shape_idx in range(shape_idx_start, shape_idx_end):
+            # contact normal stiffness
+            builder.shape_material_ke[shape_idx] = 1e6
+            builder.shape_material_kd[shape_idx] = 1e3   # contact damping
+            builder.shape_material_kf[shape_idx] = 1e2   # frictional stiffness
+            builder.shape_material_mu[shape_idx] = 0.8   # friction coefficient
         return builder
 
     @staticmethod
-    def get_MorphIt_spheres():
-        pass
+    def get_MorphIt_spheres(builder):
+        # TODO: Need better MorphIt spheres
+        sp = f"/home/ava/Research/Codes/MorphIt-1/src/results/output/pink_10.json"
+        builder.add_particle_volume(
+            volume_data=sp,
+            pos=Box.pos,
+            rot=Box.rot,
+            vel=wp.vec3(0.0),
+            total_mass=0.44245069148018956,
+        )
+        return builder
 
     @staticmethod
-    def get_default_spheres():
-        pass
+    def get_default_spheres(builder):
+        raise NotImplementedError
+
 
 class Example:
     def __init__(self, viewer, experiment):
@@ -69,16 +88,17 @@ class Example:
         self.model = builder.finalize()
 
         if experiment == "gt":
-            self.solver = newton.solvers.SolverMuJoCo(self.model, iterations=100, ls_iterations=50, njmax=100)
+            self.solver = newton.solvers.SolverMuJoCo(self.model,
+                                                      njmax=20,
+                                                      iterations=100)
         elif experiment == "b1":
             self.solver = newton.solvers.SolverSemiImplicit(self.model)
-        elif experiment == "b2":
-            self.solver = newton.solvers.SolverSRXPBD(self.model, iterations=10)
+        elif experiment in ["b2", "ours"]:
+            self.solver = newton.solvers.SolverSRXPBD(self.model,
+                                                      iterations=10)
         elif experiment == "b3":
-            self.solver = newton.solvers.SolverXPBD(self.model, iterations=10)
-        elif experiment == "ours":
-            self.solver = newton.solvers.SolverSRXPBD(self.model, iterations=10)
-
+            self.solver = newton.solvers.SolverXPBD(self.model,
+                                                    iterations=10)
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
@@ -87,7 +107,8 @@ class Example:
         self.viewer.set_model(self.model)
 
         # not required for MuJoCo, but required for maximal-coordinate solvers like XPBD
-        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+        newton.eval_fk(self.model, self.model.joint_q,
+                       self.model.joint_qd, self.state_0)
         self.capture()
 
     def capture(self):
@@ -101,11 +122,10 @@ class Example:
     def simulate(self):
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
-            # apply forces to the model
             self.viewer.apply_forces(self.state_0)
             self.contacts = self.model.collide(self.state_0)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
-            # swap states
+            self.solver.step(self.state_0, self.state_1,
+                             self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
@@ -120,6 +140,7 @@ class Example:
         self.viewer.log_state(self.state_0)
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
+
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
