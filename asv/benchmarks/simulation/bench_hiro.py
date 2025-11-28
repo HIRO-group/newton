@@ -46,6 +46,11 @@ class B1(BaseExample):
         experiment = "b1"
         super().setup(experiment)
 
+class B2(BaseExample):
+    def setup(self):
+        experiment = "b2"
+        super().setup(experiment)
+
 class B3(BaseExample):
     def setup(self):
         experiment = "b3"
@@ -63,8 +68,8 @@ if __name__ == "__main__":
 
     benchmark_list = {
         "gt": GT,
-        "ours": OURS,
         "b1": B1,
+        "b2": B2,
         "b3": B3,
 
     }

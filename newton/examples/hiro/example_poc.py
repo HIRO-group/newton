@@ -39,6 +39,7 @@ class Box:
                          floating=True,
                          ignore_inertial_definitions=True,
                          scale=3.0)  # Adds two mesh: visual + collision
+        
         shape_idx_end = len(builder.shape_type)
         for shape_idx in range(shape_idx_start, shape_idx_end):
             # contact normal stiffness
@@ -50,6 +51,7 @@ class Box:
 
     @staticmethod
     def get_MorphIt_spheres(builder):
+        raise NotImplementedError
         # TODO: Need better MorphIt spheres
         sp = f"/home/ava/Research/Codes/MorphIt-1/src/results/output/pink_10.json"
         builder.add_particle_volume(
@@ -57,13 +59,39 @@ class Box:
             pos=Box.pos,
             rot=Box.rot,
             vel=wp.vec3(0.0),
-            total_mass=0.44245069148018956,
+            total_mass=11.94,
         )
         return builder
 
     @staticmethod
     def get_default_spheres(builder):
-        raise NotImplementedError
+        L = 0.0762 * 3.0
+        N = 2
+        dim_x = dim_y = dim_z = N
+        cell = L / N
+        radius_mean = cell * 0.5
+        total_mass = 11.94
+        num_particles = dim_x * dim_y * dim_z
+        mass_per_particle = total_mass / num_particles
+
+        pos_corner = Box.pos - wp.vec3(L * 0.5, L * 0.5, L * 0.5) + wp.vec3(radius_mean)
+
+        builder.add_particle_grid(
+            pos=pos_corner,
+            rot=Box.rot,
+            vel=wp.vec3(0.0),
+            dim_x=dim_x,
+            dim_y=dim_y,
+            dim_z=dim_z,
+            cell_x=cell,
+            cell_y=cell,
+            cell_z=cell,
+            mass=mass_per_particle,
+            jitter=0.0,
+            radius_mean=radius_mean,
+            radius_std=0.0,
+        )
+        return builder
 
 
 class Example:
@@ -127,6 +155,7 @@ class Example:
             self.solver.step(self.state_0, self.state_1,
                              self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
+           
 
     def step(self):
         if self.graph:
