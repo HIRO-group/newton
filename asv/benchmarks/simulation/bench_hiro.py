@@ -13,23 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from newton.examples.hiro.example_poc import Example as example_base
+import newton
 import warp as wp
 from asv_runner.benchmarks.mark import skip_benchmark_if
 
 wp.config.quiet = True
 
-import newton
 
-from newton.examples.hiro.example_fr_sp_box import Example as SphereE
-from newton.examples.hiro.example_fr_tet_box import Example as TetBox
-
-
-class SRXPBD:
+class BaseExample:
     repeat = 10
 
-    def setup(self):
+    def setup(self, experiment):
         self.num_frames = 1000
-        self.example = SphereE(viewer=newton.viewer.ViewerNull(num_frames=self.num_frames))
+        self.example = example_base(experiment=experiment,
+                                    viewer=newton.viewer.ViewerNull(num_frames=self.num_frames))
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_simulate(self):
@@ -38,18 +36,25 @@ class SRXPBD:
         wp.synchronize_device()
 
 
-class XPBD:
-    repeat = 10
-
+class GT(BaseExample):
     def setup(self):
-        self.num_frames = 1000
-        self.example = TetBox(viewer=newton.viewer.ViewerNull(num_frames=self.num_frames))
+        experiment = "gt"
+        super().setup(experiment)
 
-    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
-    def time_simulate(self):
-        for _ in range(self.num_frames):
-            self.example.step()
-        wp.synchronize_device()
+class B1(BaseExample):
+    def setup(self):
+        experiment = "b1"
+        super().setup(experiment)
+
+class B3(BaseExample):
+    def setup(self):
+        experiment = "b3"
+        super().setup(experiment)
+
+class OURS(BaseExample):
+    def setup(self):
+        experiment = "ours"
+        super().setup(experiment)
 
 
 if __name__ == "__main__":
@@ -57,11 +62,15 @@ if __name__ == "__main__":
     from newton.utils import run_benchmark
 
     benchmark_list = {
-        'SphereE': SRXPBD,
-        'TetE': XPBD
+        "gt": GT,
+        "ours": OURS,
+        "b1": B1,
+        "b3": B3,
+
     }
 
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
         "-b", "--bench", default=None, action="append", choices=benchmark_list.keys(), help="Run a single benchmark."
     )
