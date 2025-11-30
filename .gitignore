@@ -45,3 +45,4 @@ imgui.ini
 newton/tests/outputs/
 newton/examples/assets/hiro/
 newton/examples/hiro/*.png
+newton/examples/hiro/*.txt
