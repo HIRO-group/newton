@@ -26,7 +26,8 @@ from .kernels import (
     solve_particle_particle_contacts,
     solve_springs,
     solve_tetrahedra,
-    perform_shape_matching_kernel,
+    solve_shape_matching_constraints,
+    compute_shape_matching_goals
 )
 
 
@@ -127,6 +128,7 @@ class SolverSRXPBD(SolverBase):
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
         requires_grad = state_in.requires_grad
         self._particle_delta_counter = 0
+        shape_compliance = 0  # TODO: only 0 for rigid bodies
 
         model = self.model
 
@@ -153,13 +155,32 @@ class SolverSRXPBD(SolverBase):
                 body_q = state_out.body_q
                 body_qd = state_out.body_qd
                 body_deltas = wp.empty_like(state_out.body_qd)
-        
+            
+
             spring_constraint_lambdas = None
             if model.spring_count:
                 spring_constraint_lambdas = wp.empty_like(model.spring_rest_length)
             edge_constraint_lambdas = None
             if model.edge_count:
                 edge_constraint_lambdas = wp.empty_like(model.edge_rest_angle)
+
+
+            goal_positions = wp.empty_like(state_out.particle_q)
+            shape_lambdas = wp.zeros_like(state_out.particle_q)
+
+            if model.particle_count:
+                wp.launch(
+                    kernel=compute_shape_matching_goals,
+                    dim=1,
+                    inputs=[
+                        particle_q,
+                        self.particle_q_rest,
+                        model.particle_mass,
+                        model.particle_count,
+                        goal_positions
+                    ],
+                    device=model.device
+                )
 
             for i in range(self.iterations):
                 with wp.ScopedTimer(f"iteration_{i}", False):
@@ -289,22 +310,23 @@ class SolverSRXPBD(SolverBase):
                         # shape matching
                         if model.particle_count:
                             wp.launch(
-                                kernel=perform_shape_matching_kernel,
-                                dim=1,
+                                kernel=solve_shape_matching_constraints,
+                                dim=model.particle_count,
                                 inputs=[
                                     particle_q,
-                                    self.particle_q_rest,
-                                    model.particle_mass,
+                                    goal_positions,
+                                    model.particle_inv_mass,
                                     model.particle_count,
+                                    shape_lambdas,
+                                    shape_compliance,
+                                    dt,
                                 ],
                                 outputs=[particle_deltas],
-                                device=model.device,
+                                device=model.device
                             )
-
                         particle_q, particle_qd = self.apply_particle_deltas(
                             model, state_in, state_out, particle_deltas, dt
                         )
-
 
             if model.particle_count:
                 if particle_q.ptr != state_out.particle_q.ptr:

@@ -112,17 +112,15 @@ def apply_particle_shape_restitution(
 
         wp.atomic_add(particle_v_out, tid, dv)
 
+
 @wp.kernel
-def perform_shape_matching_kernel(
+def compute_shape_matching_goals(
     particle_q: wp.array(dtype=wp.vec3),
     particle_q_init: wp.array(dtype=wp.vec3),
     particle_mass: wp.array(dtype=float),
     particle_count: int,
-    delta: wp.array(dtype=wp.vec3),
+    goal_positions: wp.array(dtype=wp.vec3)
 ):
-    tid = wp.tid()
-
-    # compute total weight and centroids
     tot_w = float(0.0)
     t = wp.vec3(0.0)
     t0 = wp.vec3(0.0)
@@ -158,14 +156,43 @@ def perform_shape_matching_kernel(
     if (wp.determinant(R) < 0.0): # TODO
         U[:,2] = -U[:,2]
         R = U @ wp.transpose(V) 
-
-    # apply goal positions
+    
     for i in range(particle_count):
         x0 = particle_q_init[i]
         x = particle_q[i]
-        g = R * (x0 - t0) + t
-        d = g - x
-        wp.atomic_add(delta, i, d)
+        goal_positions[i] = R * (x0 - t0) + t
+
+
+@wp.kernel
+def solve_shape_matching_constraints(
+    particle_q: wp.array(dtype=wp.vec3),
+    goal_positions: wp.array(dtype=wp.vec3),
+    particle_inv_mass: wp.array(dtype=float),
+    particle_count: int,
+    lambdas: wp.array(dtype=wp.vec3),
+    compliance: float,
+    dt: float,
+    delta: wp.array(dtype=wp.vec3),
+):
+    tid = wp.tid()
+    if tid >= particle_count:
+        return
+
+    alpha_tilde = compliance / (dt * dt)
+    w = particle_inv_mass[tid]
+    
+    # Constraint: C(x) = x - goal
+    curr_x = particle_q[tid]
+    goal = goal_positions[tid]
+    C = curr_x - goal
+
+    # XPBD Lambda Update
+    lambda_old = lambdas[tid]
+    denom = w + alpha_tilde
+    d_lambda = (-C - alpha_tilde * lambda_old) / denom
+    lambdas[tid] = lambda_old + d_lambda
+    dx = w * d_lambda
+    wp.atomic_add(delta, tid, dx)
 
 
 @wp.kernel

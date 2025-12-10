@@ -126,7 +126,7 @@ if __name__ == "__main__":
         "-n",
         "--num_spheres",
         type=int,
-        default=5,
+        default=6,
         help="Number of spheres per box dimension for SRXPBD experiment",
     )
     viewer, args = newton.examples.init(parser)
