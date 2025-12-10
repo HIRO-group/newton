@@ -168,7 +168,7 @@ class SolverSRXPBD(SolverBase):
             goal_positions = wp.empty_like(state_out.particle_q)
             shape_lambdas = wp.zeros_like(state_out.particle_q)
 
-            if model.particle_count and model.shape_count:
+            if model.particle_count:
                 wp.launch(
                     kernel=compute_shape_matching_goals,
                     dim=1,
