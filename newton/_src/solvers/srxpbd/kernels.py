@@ -112,12 +112,104 @@ def apply_particle_shape_restitution(
 
         wp.atomic_add(particle_v_out, tid, dv)
 
+
 @wp.kernel
-def perform_shape_matching_kernel(
+def compute_shape_matching_goals(
     particle_q: wp.array(dtype=wp.vec3),
     particle_q_init: wp.array(dtype=wp.vec3),
     particle_mass: wp.array(dtype=float),
     particle_count: int,
+    goal_positions: wp.array(dtype=wp.vec3)
+):
+    tot_w = float(0.0)
+    t = wp.vec3(0.0)
+    t0 = wp.vec3(0.0)
+    for i in range(particle_count):
+        w = particle_mass[i]
+        x = particle_q[i]
+        x0 = particle_q_init[i]
+
+        tot_w += w
+        t += w * x
+        t0 += w * x0
+
+    t *= (1.0/ tot_w)
+    t0 *= (1.0/ tot_w)
+
+    # covariance A
+    A = wp.mat33(0.0)
+    for i in range(particle_count):
+        w = particle_mass[i]
+        x = particle_q[i]
+        x0 = particle_q_init[i]
+        pi = x - t
+        qi = x0 - t0
+        A += wp.outer(pi, qi) * w
+
+    # polar decomposition via SVD
+    U = wp.mat33()
+    S = wp.vec3()
+    V = wp.mat33()
+    wp.svd3(A, U, S, V)
+    R = U @ wp.transpose(V)
+
+    if (wp.determinant(R) < 0.0): # TODO
+        U[:,2] = -U[:,2]
+        R = U @ wp.transpose(V) 
+    
+    for i in range(particle_count):
+        x0 = particle_q_init[i]
+        x = particle_q[i]
+        goal_positions[i] = R * (x0 - t0) + t
+
+
+@wp.kernel
+def solve_shape_matching_constraints(
+    particle_q: wp.array(dtype=wp.vec3),
+    goal_positions: wp.array(dtype=wp.vec3),
+    particle_inv_mass: wp.array(dtype=float),
+    particle_count: int,
+    lambdas: wp.array(dtype=wp.vec3),
+    compliance: float,
+    dt: float,
+    delta: wp.array(dtype=wp.vec3),
+):
+    tid = wp.tid()
+    if tid >= particle_count:
+        return
+
+    # XPBD Compliance factor
+    alpha_tilde = compliance / (dt * dt)
+    w_inv = particle_inv_mass[tid]
+    
+    # 1. Constraint: C(x) = x - goal
+    # Since 'goal' is fixed for this substep, C is stable.
+    curr_x = particle_q[tid]
+    goal = goal_positions[tid]
+    C = curr_x - goal
+
+    # 2. XPBD Lambda Update
+    # For a simple distance constraint |x - g| = 0:
+    # Gradient magnitude is 1. denominator = w_inv + alpha
+    lambda_old = lambdas[tid]
+    denom = w_inv + alpha_tilde
+    d_lambda = (-C - alpha_tilde * lambda_old) / denom
+    lambdas[tid] = lambda_old + d_lambda
+
+    dx = w_inv * d_lambda
+    wp.atomic_add(delta, tid, dx)
+
+
+@wp.kernel
+def perform_OLD_shape_matching_kernel(
+    particle_q: wp.array(dtype=wp.vec3),
+    particle_q_init: wp.array(dtype=wp.vec3),
+    particle_mass: wp.array(dtype=float),
+    particle_inv_mass: wp.array(dtype=float),
+    particle_count: int,
+    lambdas: wp.array(dtype=wp.vec3),
+    compliance: float,
+    dt: float,
     delta: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
@@ -159,14 +251,27 @@ def perform_shape_matching_kernel(
         U[:,2] = -U[:,2]
         R = U @ wp.transpose(V) 
 
+    alpha_tilde = compliance / (dt * dt)
+
     # apply goal positions
     for i in range(particle_count):
         x0 = particle_q_init[i]
         x = particle_q[i]
         g = R * (x0 - t0) + t
-        d = g - x
-        wp.atomic_add(delta, i, d)
+        # wp.atomic_add(delta, i, g-x)
 
+        C = x - g
+        w_inv = particle_inv_mass[i]
+
+        # λ update: vector-valued constraint
+        lambda_old = lambdas[i]
+        denom = w_inv + alpha_tilde
+        delta_lambda = (-C - alpha_tilde * lambda_old) / denom
+        lambdas[i] = lambda_old + delta_lambda
+
+        # Position update: Δx = w * Δλ
+        dx = w_inv * delta_lambda
+        wp.atomic_add(delta, i, dx)
 
 @wp.kernel
 def solve_particle_shape_contacts(
