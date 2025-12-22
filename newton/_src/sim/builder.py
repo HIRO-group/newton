@@ -22,6 +22,7 @@ import ctypes
 import json
 import math
 import warnings
+import trimesh
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -3730,13 +3731,58 @@ class ModelBuilder:
                         r = radius_mean
                     self.add_particle(p, vel, m, r)
 
+
+    def manual_sphere_packing(self, mesh_file, radius, spacing, total_mass, pos=None, rot=None):
+        """
+        Loads the input mesh (path or trimesh.Trimesh), samples a regular grid of
+        candidate points inside the mesh bounding box with spacing `spacing`,
+        keeps only points that lie inside the mesh, and produces a dict with
+        keys "centers" and "radii" containing the centers and radii for
+        `add_particle_volume`.
+        """
+        mesh = trimesh.load(mesh_file, force="mesh")
+        if mesh.is_empty:
+            return 0
+
+        # bounding box, pad by radius so we allow centers near the surface
+        bounds = mesh.bounds  # (min, max)
+        mins = np.array(bounds[0], dtype=float) - float(radius)
+        maxs = np.array(bounds[1], dtype=float) + float(radius)
+
+        # build grid of candidate centers
+        xs = np.arange(mins[0], maxs[0] + 1e-8, spacing, dtype=float)
+        ys = np.arange(mins[1], maxs[1] + 1e-8, spacing, dtype=float)
+        zs = np.arange(mins[2], maxs[2] + 1e-8, spacing, dtype=float)
+
+        if xs.size == 0 or ys.size == 0 or zs.size == 0:
+            return 0
+
+        # create a (N,3) array of candidate points
+        X, Y, Z = np.meshgrid(xs, ys, zs, indexing="xy")
+        candidates = np.vstack((X.ravel(), Y.ravel(), Z.ravel())).T
+
+        # keep only candidates inside the mesh
+        inside = mesh.contains(candidates)
+
+        pts_in = candidates[inside]
+
+        if pts_in.shape[0] == 0:
+            return 0
+
+        centers = pts_in.tolist()
+        radii = [float(radius)] * len(centers)
+        volume_dict = {"centers": centers, "radii": radii}
+
+        return self.add_particle_volume(volume_dict, total_mass=total_mass, pos=pos, rot=rot)
+
+
     def add_particle_volume(
         self,
         volume_data: str | dict[str, Any],
+        total_mass: float,
         pos: Vec3 | None = None,
         rot: Quat | None = None,
         vel: Vec3 | None = None,
-        total_mass: float = 1.0,
     ):
         """
         Adds particles to fill a volume defined by a union of spheres from JSON data.
