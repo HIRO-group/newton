@@ -186,13 +186,16 @@ def solve_shape_matching_constraints(
     goal = goal_positions[tid]
     C = curr_x - goal
 
-    # XPBD Lambda Update
-    lambda_old = lambdas[tid]
-    denom = w + alpha_tilde
-    d_lambda = (-C - alpha_tilde * lambda_old) / denom
-    lambdas[tid] = lambda_old + d_lambda
-    dx = w * d_lambda
+    dx =  (goal-curr_x)
     wp.atomic_add(delta, tid, dx)
+
+    # XPBD Lambda Update
+    # lambda_old = lambdas[tid]
+    # denom = w + alpha_tilde
+    # d_lambda = (-C - alpha_tilde * lambda_old) / denom
+    # lambdas[tid] = lambda_old + d_lambda
+    # dx = w * d_lambda
+    # wp.atomic_add(delta, tid, dx)
 
 
 @wp.kernel
