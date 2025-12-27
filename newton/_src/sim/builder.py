@@ -3767,7 +3767,7 @@ class ModelBuilder:
         pts_in = candidates[inside]
 
         if pts_in.shape[0] == 0:
-            return 0
+            raise ValueError(f"No points found inside mesh {mesh_file} with radius {radius} and spacing {spacing}")
 
         centers = pts_in.tolist()
         radii = [float(radius)] * len(centers)
