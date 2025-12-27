@@ -26,8 +26,7 @@ from .kernels import (
     solve_particle_particle_contacts,
     solve_springs,
     solve_tetrahedra,
-    solve_shape_matching_constraints,
-    compute_shape_matching_goals
+    solve_shape_matching,
 )
 
 
@@ -128,7 +127,6 @@ class SolverSRXPBD(SolverBase):
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
         requires_grad = state_in.requires_grad
         self._particle_delta_counter = 0
-        shape_compliance = 0  # TODO: only 0 for rigid bodies
 
         model = self.model
 
@@ -164,23 +162,6 @@ class SolverSRXPBD(SolverBase):
             if model.edge_count:
                 edge_constraint_lambdas = wp.empty_like(model.edge_rest_angle)
 
-
-            goal_positions = wp.empty_like(state_out.particle_q)
-            shape_lambdas = wp.zeros_like(state_out.particle_q)
-
-            if model.particle_count:
-                wp.launch(
-                    kernel=compute_shape_matching_goals,
-                    dim=1,
-                    inputs=[
-                        particle_q,
-                        self.particle_q_rest,
-                        model.particle_mass,
-                        model.particle_count,
-                        goal_positions
-                    ],
-                    device=model.device
-                )
 
             for i in range(self.iterations):
                 with wp.ScopedTimer(f"iteration_{i}", False):
@@ -309,17 +290,16 @@ class SolverSRXPBD(SolverBase):
 
                         # shape matching
                         if model.particle_count:
+                            local_delta = wp.zeros_like(particle_deltas)
                             wp.launch(
-                                kernel=solve_shape_matching_constraints,
-                                dim=model.particle_count,
+                                kernel=solve_shape_matching,
+                                dim=1,
                                 inputs=[
                                     particle_q,
-                                    goal_positions,
-                                    model.particle_inv_mass,
+                                    self.particle_q_rest,
+                                    model.particle_mass,
                                     model.particle_count,
-                                    shape_lambdas,
-                                    shape_compliance,
-                                    dt,
+                                    local_delta,
                                 ],
                                 outputs=[particle_deltas],
                                 device=model.device
