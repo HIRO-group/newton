@@ -30,7 +30,7 @@ from .kernels import (
 )
 
 
-class SolverSRXPBD(SolverBase):
+class SolverSRXPBDOLD(SolverBase):
     """An implicit integrator using eXtended Position-Based Dynamics (XPBD) for rigid and soft body simulation.
 
     References:
@@ -148,11 +148,20 @@ class SolverSRXPBD(SolverBase):
                     self.particle_qd_init = wp.clone(state_in.particle_qd)
                 particle_deltas = wp.empty_like(state_out.particle_qd)
                 self.integrate_particles(model, state_in, state_out, dt)
-
+            
             if model.body_count:
                 body_q = state_out.body_q
                 body_qd = state_out.body_qd
                 body_deltas = wp.empty_like(state_out.body_qd)
+            
+
+            spring_constraint_lambdas = None
+            if model.spring_count:
+                spring_constraint_lambdas = wp.empty_like(model.spring_rest_length)
+            edge_constraint_lambdas = None
+            if model.edge_count:
+                edge_constraint_lambdas = wp.empty_like(model.edge_rest_angle)
+
 
             for i in range(self.iterations):
                 with wp.ScopedTimer(f"iteration_{i}", False):
@@ -161,6 +170,8 @@ class SolverSRXPBD(SolverBase):
                             particle_deltas = wp.zeros_like(particle_deltas)
                         else:
                             particle_deltas.zero_()
+
+                        # particle-rigid/shape contacts (including ground plane)
                         if model.shape_count:
                             wp.launch(
                                 kernel=solve_particle_shape_contacts,
@@ -194,33 +205,148 @@ class SolverSRXPBD(SolverBase):
                                 outputs=[particle_deltas, body_deltas],
                                 device=model.device,
                             )
+
+                        if model.particle_max_radius > 0.0 and model.particle_count > 1:
+                            wp.launch(
+                                kernel=solve_particle_particle_contacts,
+                                dim=model.particle_count,
+                                inputs=[
+                                    model.particle_grid.id,
+                                    particle_q,
+                                    particle_qd,
+                                    model.particle_inv_mass,
+                                    model.particle_radius,
+                                    model.particle_flags,
+                                    model.particle_mu,
+                                    model.particle_cohesion,
+                                    model.particle_max_radius,
+                                    dt,
+                                    self.soft_contact_relaxation,
+                                ],
+                                outputs=[particle_deltas],
+                                device=model.device,
+                            )
+
+                        # distance constraints
+                        if model.spring_count:
+                            spring_constraint_lambdas.zero_()
+                            wp.launch(
+                                kernel=solve_springs,
+                                dim=model.spring_count,
+                                inputs=[
+                                    particle_q,
+                                    particle_qd,
+                                    model.particle_inv_mass,
+                                    model.spring_indices,
+                                    model.spring_rest_length,
+                                    model.spring_stiffness,
+                                    model.spring_damping,
+                                    dt,
+                                    spring_constraint_lambdas,
+                                ],
+                                outputs=[particle_deltas],
+                                device=model.device,
+                            )
+
+                        # bending constraints
+                        if model.edge_count:
+                            edge_constraint_lambdas.zero_()
+                            wp.launch(
+                                kernel=bending_constraint,
+                                dim=model.edge_count,
+                                inputs=[
+                                    particle_q,
+                                    particle_qd,
+                                    model.particle_inv_mass,
+                                    model.edge_indices,
+                                    model.edge_rest_angle,
+                                    model.edge_bending_properties,
+                                    dt,
+                                    edge_constraint_lambdas,
+                                ],
+                                outputs=[particle_deltas],
+                                device=model.device,
+                            )
+
+                        # tetrahedral FEM
+                        if model.tet_count:
+                            wp.launch(
+                                kernel=solve_tetrahedra,
+                                dim=model.tet_count,
+                                inputs=[
+                                    particle_q,
+                                    particle_qd,
+                                    model.particle_inv_mass,
+                                    model.tet_indices,
+                                    model.tet_poses,
+                                    model.tet_activations,
+                                    model.tet_materials,
+                                    dt,
+                                    self.soft_body_relaxation,
+                                ],
+                                outputs=[particle_deltas],
+                                device=model.device,
+                            )
+
+                        # shape matching
+                        if model.particle_count:
+                            local_delta = wp.zeros_like(particle_deltas)
+                            wp.launch(
+                                kernel=solve_shape_matching,
+                                dim=1,
+                                inputs=[
+                                    particle_q,
+                                    self.particle_q_rest,
+                                    model.particle_mass,
+                                    model.particle_count,
+                                    local_delta,
+                                ],
+                                outputs=[particle_deltas],
+                                device=model.device
+                            )
                         particle_q, particle_qd = self.apply_particle_deltas(
                             model, state_in, state_out, particle_deltas, dt
                         )
-
-            if model.particle_count:
-                local_delta = wp.zeros_like(particle_deltas)
-                
-                wp.launch(
-                    kernel=solve_shape_matching,
-                    dim=1,
-                    inputs=[
-                        particle_q,
-                        self.particle_q_rest,
-                        model.particle_mass,
-                        model.particle_count,
-                        local_delta,
-                    ],
-                    outputs=[particle_deltas],
-                    device=model.device
-                )
-                particle_q, particle_qd = self.apply_particle_deltas(
-                    model, state_in, state_out, particle_deltas, dt
-                )
 
             if model.particle_count:
                 if particle_q.ptr != state_out.particle_q.ptr:
                     state_out.particle_q.assign(particle_q)
                     state_out.particle_qd.assign(particle_qd)
 
+            if self.enable_restitution and contacts is not None:
+                if model.particle_count:
+                    wp.launch(
+                        kernel=apply_particle_shape_restitution,
+                        dim=model.particle_count,
+                        inputs=[
+                            particle_q,
+                            particle_qd,
+                            self.particle_q_init,
+                            self.particle_qd_init,
+                            model.particle_inv_mass,
+                            model.particle_radius,
+                            model.particle_flags,
+                            body_q,
+                            body_qd,
+                            model.body_com,
+                            model.body_inv_mass,
+                            model.body_inv_inertia,
+                            model.shape_body,
+                            model.particle_adhesion,
+                            model.soft_contact_restitution,
+                            contacts.soft_contact_count,
+                            contacts.soft_contact_particle,
+                            contacts.soft_contact_shape,
+                            contacts.soft_contact_body_pos,
+                            contacts.soft_contact_body_vel,
+                            contacts.soft_contact_normal,
+                            contacts.soft_contact_max,
+                            dt,
+                            self.soft_contact_relaxation,
+                        ],
+                        outputs=[state_out.particle_qd],
+                        device=model.device,
+                    )
+
+                
             return state_out
