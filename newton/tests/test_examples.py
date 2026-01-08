@@ -42,8 +42,6 @@ from newton.tests.unittest_utils import (
     sanitize_identifier,
 )
 
-wp.init()
-
 
 def _build_command_line_options(test_options: dict[str, Any]) -> list:
     """Helper function to build command-line options from the test options dictionary."""
@@ -220,8 +218,8 @@ add_example_test(
     name="basic.example_basic_urdf",
     devices=test_devices,
     test_options={"num-frames": 200},
-    test_options_cpu={"num_envs": 16},
-    test_options_cuda={"num_envs": 64},
+    test_options_cpu={"num_worlds": 16},
+    test_options_cuda={"num_worlds": 64},
     use_viewer=True,
 )
 
@@ -235,6 +233,47 @@ add_example_test(
     devices=test_devices,
     use_viewer=True,
     test_options={"num-frames": 150},
+)
+
+
+class TestCableExamples(unittest.TestCase):
+    pass
+
+
+add_example_test(
+    TestCableExamples,
+    name="cable.example_cable_bend",
+    devices=test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 20},
+)
+add_example_test(
+    TestCableExamples,
+    name="cable.example_cable_bend_damping",
+    devices=test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 20},
+)
+add_example_test(
+    TestCableExamples,
+    name="cable.example_cable_twist",
+    devices=test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 20},
+)
+add_example_test(
+    TestCableExamples,
+    name="cable.example_cable_helix",
+    devices=test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 20},
+)
+add_example_test(
+    TestCableExamples,
+    name="cable.example_cable_pile",
+    devices=test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 20},
 )
 
 
@@ -270,6 +309,14 @@ add_example_test(
 add_example_test(
     TestClothExamples,
     name="cloth.example_cloth_style3d",
+    devices=cuda_test_devices,
+    test_options={},
+    test_options_cuda={"num-frames": 32},
+    use_viewer=True,
+)
+add_example_test(
+    TestClothExamples,
+    name="cloth.example_cloth_h1",
     devices=cuda_test_devices,
     test_options={},
     test_options_cuda={"num-frames": 32},
@@ -353,6 +400,13 @@ add_example_test(
     name="robot.example_robot_allegro_hand",
     devices=cuda_test_devices,
     test_options={"usd_required": True, "num-frames": 500},
+    use_viewer=True,
+)
+add_example_test(
+    TestRobotExamples,
+    name="robot.example_robot_panda_hydro",
+    devices=cuda_test_devices,
+    test_options={"usd_required": True, "num-frames": 600},
     use_viewer=True,
 )
 
@@ -443,11 +497,21 @@ add_example_test(TestIKExamples, name="ik.example_ik_franka", devices=test_devic
 
 add_example_test(TestIKExamples, name="ik.example_ik_h1", devices=test_devices, use_viewer=True)
 
+add_example_test(TestIKExamples, name="ik.example_ik_custom", devices=cuda_test_devices, use_viewer=True)
+
 add_example_test(
     TestIKExamples,
     name="ik.example_ik_benchmark",
     devices=test_devices,
     test_options_cpu={"batch_sizes": [1, 10]},
+    use_viewer=True,
+)
+
+add_example_test(
+    TestIKExamples,
+    name="ik.example_ik_cube_stacking",
+    test_options_cuda={"num-worlds": 16, "cube-count": 2, "num-frames": 1400},  # "cube-count": 3, "num-frames": 2000
+    devices=cuda_test_devices,
     use_viewer=True,
 )
 
@@ -531,6 +595,15 @@ add_example_test(
     use_viewer=True,
 )
 
+add_example_test(
+    TestDiffSimExamples,
+    name="diffsim.example_diffsim_bear",
+    devices=test_devices,
+    test_options={"usd_required": True, "num-frames": 4 * 60},  # train_iters * sim_steps
+    test_options_cpu={"num-frames": 2, "sim-steps": 10},
+    use_viewer=True,
+)
+
 
 class TestSensorExamples(unittest.TestCase):
     pass
@@ -539,6 +612,14 @@ class TestSensorExamples(unittest.TestCase):
 add_example_test(
     TestSensorExamples,
     name="sensors.example_sensor_contact",
+    devices=test_devices,
+    test_options={"num-frames": 160},  # required for ball to reach plate
+    use_viewer=True,
+)
+
+add_example_test(
+    TestSensorExamples,
+    name="sensors.example_sensor_tiled_camera",
     devices=cuda_test_devices,
     test_options={"num-frames": 4 * 36},  # train_iters * sim_steps
     use_viewer=True,
@@ -573,7 +654,13 @@ add_example_test(
     use_viewer=True,
 )
 
+add_example_test(
+    TestMPMExamples,
+    name="mpm.example_mpm_twoway_coupling",
+    devices=cuda_test_devices,
+    test_options={"viewer": "null", "num-frames": 80},
+    use_viewer=True,
+)
+
 if __name__ == "__main__":
-    # force rebuild of all kernels
-    # wp.clear_kernel_cache()
     unittest.main(verbosity=2)

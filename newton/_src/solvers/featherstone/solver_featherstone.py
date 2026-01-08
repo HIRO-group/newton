@@ -16,26 +16,32 @@
 import warp as wp
 
 from ...core.types import override
-from ...sim import Contacts, Control, Model, State, eval_fk
-from ..euler.kernels import (
-    eval_bending_forces,
-    eval_muscle_forces,
+from ...sim import Contacts, Control, Model, State
+from ..semi_implicit.kernels_contact import (
+    eval_body_contact,
     eval_particle_body_contact_forces,
-    eval_rigid_contacts,
+    eval_particle_contact_forces,
+)
+from ..semi_implicit.kernels_muscle import (
+    eval_muscle_forces,
+)
+from ..semi_implicit.kernels_particle import (
+    eval_bending_forces,
     eval_spring_forces,
-    eval_tetrahedral_forces,
+    eval_tetrahedra_forces,
     eval_triangle_forces,
 )
-from ..euler.particles import eval_particle_forces
 from ..solver import SolverBase
 from .kernels import (
     compute_com_transforms,
     compute_spatial_inertia,
+    convert_body_force_com_to_origin,
     create_inertia_matrix_cholesky_kernel,
     create_inertia_matrix_kernel,
     eval_dense_cholesky_batched,
     eval_dense_gemm_batched,
     eval_dense_solve_batched,
+    eval_fk_with_velocity_conversion,
     eval_rigid_fk,
     eval_rigid_id,
     eval_rigid_jacobian,
@@ -309,6 +315,13 @@ class SolverFeatherstone(SolverBase):
 
             if state_in.body_count:
                 body_f = state_in.body_f
+                wp.launch(
+                    convert_body_force_com_to_origin,
+                    dim=model.body_count,
+                    inputs=[state_in.body_q, self.body_X_com],
+                    outputs=[body_f],
+                    device=model.device,
+                )
 
             # damped springs
             eval_spring_forces(model, state_in, particle_f)
@@ -320,10 +333,10 @@ class SolverFeatherstone(SolverBase):
             eval_bending_forces(model, state_in, particle_f)
 
             # tetrahedral FEM
-            eval_tetrahedral_forces(model, state_in, control, particle_f)
+            eval_tetrahedra_forces(model, state_in, control, particle_f)
 
             # particle-particle interactions
-            eval_particle_forces(model, state_in, particle_f)
+            eval_particle_contact_forces(model, state_in, particle_f)
 
             # particle shape contact
             eval_particle_body_contact_forces(model, state_in, contacts, particle_f, body_f, body_f_in_world_frame=True)
@@ -394,7 +407,7 @@ class SolverFeatherstone(SolverBase):
 
                 if contacts is not None and contacts.rigid_contact_max:
                     wp.launch(
-                        kernel=eval_rigid_contacts,
+                        kernel=eval_body_contact,
                         dim=contacts.rigid_contact_max,
                         inputs=[
                             state_in.body_q,
@@ -414,6 +427,9 @@ class SolverFeatherstone(SolverBase):
                             contacts.rigid_contact_shape1,
                             contacts.rigid_contact_thickness0,
                             contacts.rigid_contact_thickness1,
+                            contacts.rigid_contact_stiffness,
+                            contacts.rigid_contact_damping,
+                            contacts.rigid_contact_friction,
                             True,
                             self.friction_smoothing,
                         ],
@@ -435,11 +451,11 @@ class SolverFeatherstone(SolverBase):
                             model.joint_q_start,
                             model.joint_qd_start,
                             model.joint_dof_dim,
-                            model.joint_dof_mode,
+                            control.joint_target_pos,
+                            control.joint_target_vel,
                             state_in.joint_q,
                             state_in.joint_qd,
                             control.joint_f,
-                            control.joint_target,
                             model.joint_target_ke,
                             model.joint_target_kd,
                             model.joint_limit_lower,
@@ -659,8 +675,8 @@ class SolverFeatherstone(SolverBase):
                     device=model.device,
                 )
 
-                # update maximal coordinates
-                eval_fk(model, state_out.joint_q, state_out.joint_qd, state_out)
+                # update maximal coordinates using FK with velocity conversion
+                eval_fk_with_velocity_conversion(model, state_out.joint_q, state_out.joint_qd, state_out)
 
             self.integrate_particles(model, state_in, state_out, dt)
 
