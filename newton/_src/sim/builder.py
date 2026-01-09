@@ -5706,7 +5706,10 @@ class ModelBuilder:
         if new_mass == 0.0:  # no mass
             return
 
-        new_com = (self.body_com[i] * self.body_mass[i] + p * m) / new_mass
+        if self.body_com[i] * self.body_mass[i] == (0.0, 0.0, 0.0) and m == new_mass:
+            new_com = p # avoids unnecessary numerical errors
+        else:
+            new_com = (self.body_com[i] * self.body_mass[i] + p * m) / new_mass
 
         # shift inertia to new COM
         com_offset = new_com - self.body_com[i]

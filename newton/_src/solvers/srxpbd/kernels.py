@@ -114,91 +114,6 @@ def apply_particle_shape_restitution(
 
 
 @wp.kernel
-def compute_shape_matching_goals(
-    particle_q: wp.array(dtype=wp.vec3),
-    particle_q_init: wp.array(dtype=wp.vec3),
-    particle_mass: wp.array(dtype=float),
-    particle_count: int,
-    goal_positions: wp.array(dtype=wp.vec3)
-):
-    tot_w = float(0.0)
-    t = wp.vec3(0.0)
-    t0 = wp.vec3(0.0)
-    for i in range(particle_count):
-        w = particle_mass[i]
-        x = particle_q[i]
-        x0 = particle_q_init[i]
-
-        tot_w += w
-        t += w * x
-        t0 += w * x0
-
-    t *= (1.0/ tot_w)
-    t0 *= (1.0/ tot_w)
-
-    # covariance A
-    A = wp.mat33(0.0)
-    for i in range(particle_count):
-        w = particle_mass[i]
-        x = particle_q[i]
-        x0 = particle_q_init[i]
-        pi = x - t
-        qi = x0 - t0
-        A += wp.outer(pi, qi) * w
-
-    # polar decomposition via SVD
-    U = wp.mat33()
-    S = wp.vec3()
-    V = wp.mat33()
-    wp.svd3(A, U, S, V)
-    R = U @ wp.transpose(V)
-
-    if (wp.determinant(R) < 0.0): # TODO
-        U[:,2] = -U[:,2]
-        R = U @ wp.transpose(V) 
-    
-    for i in range(particle_count):
-        x0 = particle_q_init[i]
-        x = particle_q[i]
-        goal_positions[i] = R * (x0 - t0) + t
-
-
-@wp.kernel
-def solve_shape_matching_constraints(
-    particle_q: wp.array(dtype=wp.vec3),
-    goal_positions: wp.array(dtype=wp.vec3),
-    particle_inv_mass: wp.array(dtype=float),
-    particle_count: int,
-    lambdas: wp.array(dtype=wp.vec3),
-    compliance: float,
-    dt: float,
-    delta: wp.array(dtype=wp.vec3),
-):
-    tid = wp.tid()
-    if tid >= particle_count:
-        return
-
-    alpha_tilde = compliance / (dt * dt)
-    w = particle_inv_mass[tid]
-    
-    # Constraint: C(x) = x - goal
-    curr_x = particle_q[tid]
-    goal = goal_positions[tid]
-    C = curr_x - goal
-
-    dx =  (goal-curr_x)
-    wp.atomic_add(delta, tid, dx)
-
-    # XPBD Lambda Update
-    # lambda_old = lambdas[tid]
-    # denom = w + alpha_tilde
-    # d_lambda = (-C - alpha_tilde * lambda_old) / denom
-    # lambdas[tid] = lambda_old + d_lambda
-    # dx = w * d_lambda
-    # wp.atomic_add(delta, tid, dx)
-
-
-@wp.kernel
 def solve_particle_shape_contacts(
     particle_x: wp.array(dtype=wp.vec3),
     particle_v: wp.array(dtype=wp.vec3),
@@ -858,6 +773,69 @@ def solve_tetrahedra2(
     wp.atomic_sub(delta, j, delta1 * w1 * relaxation)
     wp.atomic_sub(delta, k, delta2 * w2 * relaxation)
     wp.atomic_sub(delta, l, delta3 * w3 * relaxation)
+
+
+@wp.kernel
+def solve_shape_matching(
+    particle_q: wp.array(dtype=wp.vec3),
+    particle_q_rest: wp.array(dtype=wp.vec3),
+    particle_mass: wp.array(dtype=float),
+    particle_count: int,
+    local_delta: wp.array(dtype=wp.vec3),
+    delta: wp.array(dtype=wp.vec3),
+):
+
+    tot_w = float(0.0)
+    t = wp.vec3(0.0)
+    t0 = wp.vec3(0.0)
+    for i in range(particle_count):
+        w = particle_mass[i]
+        x = particle_q[i]
+        x0 = particle_q_rest[i]
+
+        tot_w += w
+        t += w * x
+        t0 += w * x0
+
+    t = t / tot_w
+    t0 = t0 / tot_w
+
+    # covariance A
+    A = wp.mat33(0.0)
+    for i in range(particle_count):
+        w = particle_mass[i]
+        x = particle_q[i]
+        x0 = particle_q_rest[i]
+        pi = x - t
+        qi = x0 - t0
+        A += wp.outer(pi, qi) * w
+
+    # polar decomposition via SVD
+    U = wp.mat33()
+    S = wp.vec3()
+    V = wp.mat33()
+    wp.svd3(A, U, S, V)
+    R = U @ wp.transpose(V)
+
+    if (wp.determinant(R) < 0.0): # TODO
+        U[:,2] = -U[:,2]
+        R = U @ wp.transpose(V)
+    
+    for i in range(particle_count):
+        x0 = particle_q_rest[i]
+        x = particle_q[i]
+        goal = R @ (x0 - t0) + t
+        dx =  (goal-x)
+        local_delta[i] = dx
+
+    # Enforce conservation of momentum
+    mean = wp.vec3(0.0, 0.0, 0.0)
+    for i in range(particle_count):
+        m = particle_mass[i]
+        mean += local_delta[i] * m
+    mean = mean / tot_w
+    for i in range(particle_count):
+        wp.atomic_add(delta, i, local_delta[i] - mean)
 
 
 @wp.kernel
