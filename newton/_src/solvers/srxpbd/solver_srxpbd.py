@@ -47,9 +47,11 @@ class SolverSRXPBD(SolverBase):
         state_out: State,
         particle_deltas: wp.array,
         dt: float,
+        shape_matching_update: bool,
     ):
         if state_in.requires_grad:
             particle_q = state_out.particle_q
+            particle_qd = state_out.particle_qd
             # allocate new particle arrays so gradients can be tracked correctly without overwriting
             new_particle_q = wp.empty_like(state_out.particle_q)
             new_particle_qd = wp.empty_like(state_out.particle_qd)
@@ -57,10 +59,12 @@ class SolverSRXPBD(SolverBase):
         else:
             if self._particle_delta_counter == 0:
                 particle_q = state_out.particle_q
+                particle_qd = state_out.particle_qd
                 new_particle_q = state_in.particle_q
                 new_particle_qd = state_in.particle_qd
             else:
                 particle_q = state_in.particle_q
+                particle_qd = state_in.particle_qd
                 new_particle_q = state_out.particle_q
                 new_particle_qd = state_out.particle_qd
             self._particle_delta_counter = 1 - self._particle_delta_counter
@@ -71,10 +75,13 @@ class SolverSRXPBD(SolverBase):
             inputs=[
                 self.particle_q_init,
                 particle_q,
+                particle_qd, 
+                model.particle_inv_mass,
                 model.particle_flags,
                 particle_deltas,
                 dt,
                 model.particle_max_velocity,
+                shape_matching_update,
             ],
             outputs=[new_particle_q, new_particle_qd],
             device=model.device,
@@ -105,12 +112,11 @@ class SolverSRXPBD(SolverBase):
             if model.particle_count:
                 particle_q = state_out.particle_q
                 particle_qd = state_out.particle_qd
-
                 self.particle_q_init = wp.clone(state_in.particle_q)
-                if self.enable_restitution:
-                    self.particle_qd_init = wp.clone(state_in.particle_qd)
+                self.particle_qd_init = wp.clone(state_in.particle_qd)
                 particle_deltas = wp.empty_like(state_out.particle_qd)
                 self.integrate_particles(model, state_in, state_out, dt)
+
 
             if model.body_count:
                 body_q = state_out.body_q
@@ -156,19 +162,18 @@ class SolverSRXPBD(SolverBase):
                                 # outputs
                                 outputs=[particle_deltas, body_deltas],
                                 device=model.device,
-                            )
+                        )
                         particle_q, particle_qd = self.apply_particle_deltas(
-                            model, state_in, state_out, particle_deltas, dt
+                            model, state_in, state_out, particle_deltas, dt, shape_matching_update=False
                         )
 
             if model.particle_count:
                 local_delta = wp.zeros_like(particle_deltas)
-                
                 wp.launch(
                     kernel=solve_shape_matching,
                     dim=1,
                     inputs=[
-                        particle_q,
+                        particle_q, 
                         self.particle_q_rest,
                         model.particle_mass,
                         model.particle_count,
@@ -178,7 +183,7 @@ class SolverSRXPBD(SolverBase):
                     device=model.device
                 )
                 particle_q, particle_qd = self.apply_particle_deltas(
-                    model, state_in, state_out, particle_deltas, dt
+                    model, state_in, state_out, particle_deltas, dt, shape_matching_update=True
                 )
 
             if model.particle_count:
