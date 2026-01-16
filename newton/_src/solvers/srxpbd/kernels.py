@@ -932,12 +932,10 @@ def apply_particle_deltas(
     x_orig: wp.array(dtype=wp.vec3),
     x_pred: wp.array(dtype=wp.vec3),
     v_pred: wp.array(dtype=wp.vec3),
-    particle_inv_mass: wp.array(dtype=float),
     particle_flags: wp.array(dtype=wp.int32),
     delta: wp.array(dtype=wp.vec3),
     dt: float,
     v_max: float,
-    shape_matching_update: bool,
     x_out: wp.array(dtype=wp.vec3),
     v_out: wp.array(dtype=wp.vec3),
 ):
@@ -949,28 +947,22 @@ def apply_particle_deltas(
     xp = x_pred[tid]
     vp = v_pred[tid]
 
-    inv_mass = particle_inv_mass[tid]
-
     # constraint deltas
     d = delta[tid]
 
-    if shape_matching_update: # From https://graphics.stanford.edu/courses/cs468-05-fall/Papers/p471-muller.pdf
-        v_new = vp + d/dt
-        x_new = xp + d
-    else:
-        '''
-        Previously: 
-          x_new =  xp + d
-          v_new = (x_new - x0)/dt
-        But this leads to inaccurate results for long horizon simulation (such as t=10s). 
-        Assume d = 0, then x_new = xp, and v_new = (xp_x0)/dt which must be = vp 
-        But due to numerical errors it is not exactly equal to vp, leading to cumulative errors over time.
-        Below update is copied from apply_body_deltas from XPBD which creates more stability.
-        For example, if d = 0, then v_new = vp exactly. and x_new = xp exactly.
-        '''
-        dv = d/dt
-        v_new = vp + dv
-        x_new = xp + dv * dt
+    '''
+    Previously: 
+        x_new =  xp + d
+        v_new = (x_new - x0)/dt
+    But this leads to inaccurate results for long horizon simulation (such as t=10s). 
+    Assume d = 0, then x_new = xp, and v_new = (xp_x0)/dt which must be = vp 
+    But due to numerical errors it is not exactly equal to vp, leading to cumulative errors over time.
+    Below update is from shape matching paper which is more accurate:
+    https://graphics.stanford.edu/courses/cs468-05-fall/Papers/p471-muller.pdf
+    For example, if d = 0, then v_new = vp exactly. and x_new = xp exactly.
+    '''
+    v_new = vp + d/dt
+    x_new = xp + d
 
     # enforce velocity limit to prevent instability
     v_new_mag = wp.length(v_new)

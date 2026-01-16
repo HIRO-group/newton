@@ -47,7 +47,6 @@ class SolverSRXPBD(SolverBase):
         state_out: State,
         particle_deltas: wp.array,
         dt: float,
-        shape_matching_update: bool,
     ):
         if state_in.requires_grad:
             particle_q = state_out.particle_q
@@ -76,12 +75,10 @@ class SolverSRXPBD(SolverBase):
                 self.particle_q_init,
                 particle_q,
                 particle_qd, 
-                model.particle_inv_mass,
                 model.particle_flags,
                 particle_deltas,
                 dt,
                 model.particle_max_velocity,
-                shape_matching_update,
             ],
             outputs=[new_particle_q, new_particle_qd],
             device=model.device,
@@ -164,7 +161,7 @@ class SolverSRXPBD(SolverBase):
                                 device=model.device,
                         )
                         particle_q, particle_qd = self.apply_particle_deltas(
-                            model, state_in, state_out, particle_deltas, dt, shape_matching_update=False
+                            model, state_in, state_out, particle_deltas, dt
                         )
 
             if model.particle_count:
@@ -183,7 +180,7 @@ class SolverSRXPBD(SolverBase):
                     device=model.device
                 )
                 particle_q, particle_qd = self.apply_particle_deltas(
-                    model, state_in, state_out, particle_deltas, dt, shape_matching_update=True
+                    model, state_in, state_out, particle_deltas, dt
                 )
 
             if model.particle_count:
