@@ -5314,31 +5314,35 @@ class ModelBuilder:
             flags=flags,
         )
 
-
     def manual_sphere_packing(self, mesh_file, radius, spacing, total_mass, pos=None, rot=None):
         """
         Loads the input mesh (path or trimesh.Trimesh), samples a regular grid of
         candidate points inside the mesh bounding box with spacing `spacing`,
         keeps only points that lie inside the mesh, and produces a dict with
-        keys "centers" and "radii" containing the centers and radii for
-        `add_particle_volume`.
+        keys "centers" and "radii" containing the centers and radii for `add_particle_volume`.
+        mesh.contains is not deterministic
         """
+        np.random.seed(10)
         mesh = trimesh.load(mesh_file, force="mesh")
         if mesh.is_empty:
-            return 0
+            raise ValueError(f"Failed to load mesh from file: {mesh_file}")
 
-        # bounding box, pad by radius so we allow centers near the surface
-        bounds = mesh.bounds  # (min, max)
+        bounds = mesh.bounds
         mins = np.array(bounds[0], dtype=float) - float(radius)
         maxs = np.array(bounds[1], dtype=float) + float(radius)
 
-        # build grid of candidate centers
-        xs = np.arange(mins[0], maxs[0] + 1e-8, spacing, dtype=float)
-        ys = np.arange(mins[1], maxs[1] + 1e-8, spacing, dtype=float)
-        zs = np.arange(mins[2], maxs[2] + 1e-8, spacing, dtype=float)
+        # Calculate number of points for each dimension
+        nx = int(np.ceil((maxs[0] - mins[0]) / spacing)) + 1
+        ny = int(np.ceil((maxs[1] - mins[1]) / spacing)) + 1
+        nz = int(np.ceil((maxs[2] - mins[2]) / spacing)) + 1
 
-        if xs.size == 0 or ys.size == 0 or zs.size == 0:
-            return 0
+        if nx == 0 or ny == 0 or nz == 0:
+            raise ValueError(f"Invalid grid dimensions ({nx}, {ny}, {nz}) for mesh {mesh_file} with radius {radius} and spacing {spacing}")
+
+        # grid generation
+        xs = np.linspace(mins[0], mins[0] + (nx-1)*spacing, nx, dtype=float)
+        ys = np.linspace(mins[1], mins[1] + (ny-1)*spacing, ny, dtype=float)
+        zs = np.linspace(mins[2], mins[2] + (nz-1)*spacing, nz, dtype=float)
 
         # create a (N,3) array of candidate points
         X, Y, Z = np.meshgrid(xs, ys, zs, indexing="xy")
@@ -5346,7 +5350,6 @@ class ModelBuilder:
 
         # keep only candidates inside the mesh
         inside = mesh.contains(candidates)
-
         pts_in = candidates[inside]
 
         if pts_in.shape[0] == 0:
@@ -5355,7 +5358,6 @@ class ModelBuilder:
         centers = pts_in.tolist()
         radii = [float(radius)] * len(centers)
         volume_dict = {"centers": centers, "radii": radii}
-
         return self.add_particle_volume(volume_dict, total_mass=total_mass, pos=pos, rot=rot)
 
 
