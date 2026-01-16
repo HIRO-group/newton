@@ -968,7 +968,7 @@ def apply_particle_deltas(
         Below update is copied from apply_body_deltas from XPBD which creates more stability.
         For example, if d = 0, then v_new = vp exactly. and x_new = xp exactly.
         '''
-        dv = d * inv_mass/dt  
+        dv = d/dt
         v_new = vp + dv
         x_new = xp + dv * dt
 
