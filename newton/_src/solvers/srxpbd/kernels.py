@@ -215,8 +215,7 @@ def solve_particle_shape_contacts(
 
     lambda_f = wp.max(mu * lambda_n, -wp.length(vt) * dt)
     delta_f = wp.normalize(vt) * lambda_f
-    delta_total = (delta_f - delta_n) / denom * relaxation
-
+    delta_total = ((delta_f - delta_n) / denom) * relaxation
     wp.atomic_add(delta, particle_index, w1 * delta_total)
 
     if body_index >= 0:
@@ -784,7 +783,6 @@ def solve_shape_matching(
     local_delta: wp.array(dtype=wp.vec3),
     delta: wp.array(dtype=wp.vec3),
 ):
-
     tot_w = float(0.0)
     t = wp.vec3(0.0)
     t0 = wp.vec3(0.0)
@@ -817,7 +815,7 @@ def solve_shape_matching(
     wp.svd3(A, U, S, V)
     R = U @ wp.transpose(V)
 
-    if (wp.determinant(R) < 0.0): # TODO
+    if (wp.determinant(R) < 0.0):
         U[:,2] = -U[:,2]
         R = U @ wp.transpose(V)
     
@@ -825,23 +823,52 @@ def solve_shape_matching(
         x0 = particle_q_rest[i]
         x = particle_q[i]
         goal = R @ (x0 - t0) + t
-        dx =  (goal-x)
+        dx = (goal - x)
         local_delta[i] = dx
 
-    # Enforce conservation of momentum
-    mean = wp.vec3(0.0, 0.0, 0.0)
+    # Enforce conservation of linear momentum
+    linear_correction = wp.vec3(0.0, 0.0, 0.0)
     for i in range(particle_count):
         m = particle_mass[i]
-        mean += local_delta[i] * m
-    mean = mean / tot_w
+        linear_correction += local_delta[i] * m
+    linear_correction = linear_correction / tot_w
+
+    # Enforce conservation of angular momentum
+    angular_momentum = wp.vec3(0.0, 0.0, 0.0)
+    inertia_tensor = wp.mat33(0.0)
+    
     for i in range(particle_count):
-        wp.atomic_add(delta, i, local_delta[i] - mean)
+        m = particle_mass[i]
+        r = particle_q[i] - t
+        v = local_delta[i] - linear_correction
+        
+        # Accumulate angular momentum from the corrected deltas
+        angular_momentum += wp.cross(r, m * v)
+        
+        # Build inertia tensor about center of mass
+        r_outer = wp.outer(r, r)
+        r_sq = wp.dot(r, r)
+        inertia_tensor += m * (r_sq * wp.mat33(1.0, 0.0, 0.0,
+                                                 0.0, 1.0, 0.0,
+                                                 0.0, 0.0, 1.0) - r_outer)
+    
+    # Compute angular velocity correction needed to cancel angular momentum
+    # L = I * omega, so omega = I^-1 * L
+    inertia_inv = wp.inverse(inertia_tensor)
+    omega = inertia_inv @ angular_momentum
+    
+    # Apply both linear and angular momentum corrections
+    for i in range(particle_count):
+        r = particle_q[i] - t
+        angular_correction = wp.cross(omega, r)
+        wp.atomic_add(delta, i, local_delta[i] - linear_correction - angular_correction)
 
 
 @wp.kernel
 def apply_particle_deltas(
     x_orig: wp.array(dtype=wp.vec3),
     x_pred: wp.array(dtype=wp.vec3),
+    v_pred: wp.array(dtype=wp.vec3),
     particle_flags: wp.array(dtype=wp.int32),
     delta: wp.array(dtype=wp.vec3),
     dt: float,
@@ -855,12 +882,24 @@ def apply_particle_deltas(
 
     x0 = x_orig[tid]
     xp = x_pred[tid]
+    vp = v_pred[tid]
 
     # constraint deltas
     d = delta[tid]
 
+    '''
+    Previously: 
+        x_new =  xp + d
+        v_new = (x_new - x0)/dt
+    But this leads to inaccurate results for long horizon simulation (such as t=10s). 
+    Assume d = 0, then x_new = xp, and v_new = (xp_x0)/dt which must be = vp 
+    But due to numerical errors it is not exactly equal to vp, leading to cumulative errors over time.
+    Below update is from shape matching paper which is more accurate:
+    https://graphics.stanford.edu/courses/cs468-05-fall/Papers/p471-muller.pdf
+    For example, if d = 0, then v_new = vp exactly. and x_new = xp exactly.
+    '''
+    v_new = vp + d/dt
     x_new = xp + d
-    v_new = (x_new - x0) / dt
 
     # enforce velocity limit to prevent instability
     v_new_mag = wp.length(v_new)
