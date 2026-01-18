@@ -516,6 +516,9 @@ class ModelBuilder:
         self.particle_max_velocity = 1e5
         self.particle_color_groups: list[nparray] = []
         self.particle_world = []  # world index for each particle
+        self.particle_group = []  # group ID for each particle (-1 for ungrouped)
+        self.particle_groups = {}  # mapping from group ID to particle indices
+        self.particle_group_count = 0  # number of particle groups
 
         # shapes (each shape has an entry in these arrays)
         self.shape_key = []  # shape keys
@@ -1636,6 +1639,21 @@ class ModelBuilder:
                 pos_offset = np.zeros(3)
             self.particle_q.extend((np.array(builder.particle_q) + pos_offset).tolist())
             # other particle attributes are added below
+
+            # Merge particle groups with offset
+            group_offset = self.particle_group_count
+            for old_group_id, particle_indices in builder.particle_groups.items():
+                new_group_id = old_group_id + group_offset
+                # Offset particle indices
+                new_indices = [idx + start_particle_idx for idx in particle_indices]
+                self.particle_groups[new_group_id] = new_indices
+            
+            self.particle_group_count += builder.particle_group_count
+            
+            # Extend particle_group array with offset group IDs
+            offset_groups = [g + group_offset if g >= 0 else -1 for g in builder.particle_group]
+            self.particle_group.extend(offset_groups)
+
 
         if builder.spring_count:
             self.spring_indices.extend((np.array(builder.spring_indices, dtype=np.int32) + start_particle_idx).tolist())
@@ -4593,6 +4611,8 @@ class ModelBuilder:
         self.particle_radius.append(radius)
         self.particle_flags.append(flags)
         self.particle_world.append(self.current_world)
+        # Particle is not part of a group 
+        self.particle_group.append(-1)
 
         particle_id = self.particle_count - 1
 
@@ -4629,6 +4649,9 @@ class ModelBuilder:
         self.particle_flags.extend(flags)
         # Maintain world assignment for bulk particle creation
         self.particle_world.extend([self.current_world] * len(pos))
+        # All particles being added here are initialized as not belonging to a group
+        self.particle_group.extend([-1] * len(pos))
+
 
     def add_spring(self, i: int, j, ke: float, kd: float, control: float):
         """Adds a spring between two particles in the system
@@ -6006,6 +6029,12 @@ class ModelBuilder:
             m.particle_world = wp.array(self.particle_world, dtype=wp.int32)
             m.particle_max_radius = np.max(self.particle_radius) if len(self.particle_radius) > 0 else 0.0
             m.particle_max_velocity = self.particle_max_velocity
+            m.particle_group = wp.array(self.particle_group, dtype=wp.int32)
+            m.particle_groups = {
+                gid: wp.array(indices, dtype=wp.int32) 
+                for gid, indices in self.particle_groups.items()
+            }
+            m.particle_group_count = self.particle_group_count
 
             particle_colors = np.empty(self.particle_count, dtype=int)
             for color in range(len(self.particle_color_groups)):
