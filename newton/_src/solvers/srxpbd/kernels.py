@@ -779,17 +779,20 @@ def solve_shape_matching(
     particle_q: wp.array(dtype=wp.vec3),
     particle_q_rest: wp.array(dtype=wp.vec3),
     particle_mass: wp.array(dtype=float),
-    particle_count: int,
+    group_particle_indices: wp.array(dtype=int),
+    group_particle_count: int,
     local_delta: wp.array(dtype=wp.vec3),
     delta: wp.array(dtype=wp.vec3),
 ):
     tot_w = float(0.0)
     t = wp.vec3(0.0)
     t0 = wp.vec3(0.0)
-    for i in range(particle_count):
-        w = particle_mass[i]
-        x = particle_q[i]
-        x0 = particle_q_rest[i]
+    for i in range(group_particle_count):
+        # Get particle index
+        idx = group_particle_indices[i]
+        w = particle_mass[idx]
+        x = particle_q[idx]
+        x0 = particle_q_rest[idx]
 
         tot_w += w
         t += w * x
@@ -800,10 +803,11 @@ def solve_shape_matching(
 
     # covariance A
     A = wp.mat33(0.0)
-    for i in range(particle_count):
-        w = particle_mass[i]
-        x = particle_q[i]
-        x0 = particle_q_rest[i]
+    for i in range(group_particle_count):
+        idx = group_particle_indices[i]
+        w = particle_mass[idx]
+        x = particle_q[idx]
+        x0 = particle_q_rest[idx]
         pi = x - t
         qi = x0 - t0
         A += wp.outer(pi, qi) * w
@@ -819,28 +823,31 @@ def solve_shape_matching(
         U[:,2] = -U[:,2]
         R = U @ wp.transpose(V)
     
-    for i in range(particle_count):
-        x0 = particle_q_rest[i]
-        x = particle_q[i]
+    for i in range(group_particle_count):
+        idx = group_particle_indices[i]
+        x0 = particle_q_rest[idx]
+        x = particle_q[idx]
         goal = R @ (x0 - t0) + t
         dx = (goal - x)
-        local_delta[i] = dx
+        local_delta[idx] = dx
 
     # Enforce conservation of linear momentum
     linear_correction = wp.vec3(0.0, 0.0, 0.0)
-    for i in range(particle_count):
-        m = particle_mass[i]
-        linear_correction += local_delta[i] * m
+    for i in range(group_particle_count):
+        idx = group_particle_indices[i]
+        m = particle_mass[idx]
+        linear_correction += local_delta[idx] * m
     linear_correction = linear_correction / tot_w
 
     # Enforce conservation of angular momentum
     angular_momentum = wp.vec3(0.0, 0.0, 0.0)
     inertia_tensor = wp.mat33(0.0)
     
-    for i in range(particle_count):
-        m = particle_mass[i]
-        r = particle_q[i] - t
-        v = local_delta[i] - linear_correction
+    for i in range(group_particle_count):
+        idx = group_particle_indices[i]
+        m = particle_mass[idx]
+        r = particle_q[idx] - t
+        v = local_delta[idx] - linear_correction
         
         # Accumulate angular momentum from the corrected deltas
         angular_momentum += wp.cross(r, m * v)
@@ -858,10 +865,11 @@ def solve_shape_matching(
     omega = inertia_inv @ angular_momentum
     
     # Apply both linear and angular momentum corrections
-    for i in range(particle_count):
-        r = particle_q[i] - t
+    for i in range(group_particle_count):
+        idx = group_particle_indices[i]
+        r = particle_q[idx] - t
         angular_correction = wp.cross(omega, r)
-        wp.atomic_add(delta, i, local_delta[i] - linear_correction - angular_correction)
+        wp.atomic_add(delta, idx, local_delta[idx] - linear_correction - angular_correction)
 
 
 @wp.kernel
@@ -870,6 +878,7 @@ def apply_particle_deltas(
     x_pred: wp.array(dtype=wp.vec3),
     v_pred: wp.array(dtype=wp.vec3),
     particle_flags: wp.array(dtype=wp.int32),
+    particle_mass: wp.array(dtype=float),
     delta: wp.array(dtype=wp.vec3),
     dt: float,
     v_max: float,
@@ -877,6 +886,14 @@ def apply_particle_deltas(
     v_out: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
+
+    # Static particles (mass=0) don't move - just preserve current state
+    if particle_mass[tid] == 0.0:
+        x_out[tid] = x_pred[tid]
+        v_out[tid] = wp.vec3(0.0, 0.0, 0.0)
+        return
+
+    # Inactive particles do not move
     if (particle_flags[tid] & ParticleFlags.ACTIVE) == 0:
         return
 
