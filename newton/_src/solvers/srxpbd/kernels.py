@@ -231,6 +231,7 @@ def solve_particle_particle_contacts(
     particle_invmass: wp.array(dtype=float),
     particle_radius: wp.array(dtype=float),
     particle_flags: wp.array(dtype=wp.int32),
+    particle_group: wp.array(dtype=wp.int32),
     k_mu: float,
     k_cohesion: float,
     max_radius: float,
@@ -261,6 +262,15 @@ def solve_particle_particle_contacts(
     delta = wp.vec3(0.0)
 
     while wp.hash_grid_query_next(query, index):
+        # Only collide with particles from different groups (inter-group collisions are 
+        # handled by shape matching)
+        my_group = particle_group[i]
+        other_group = particle_group[index]
+
+        # Skip if same group
+        if my_group >= 0 and my_group == other_group:
+            continue
+
         if (particle_flags[index] & ParticleFlags.ACTIVE) != 0 and index != i:
             # compute distance to point
             n = x - particle_x[index]

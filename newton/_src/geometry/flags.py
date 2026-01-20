@@ -25,10 +25,6 @@ class ParticleFlags(IntEnum):
     ACTIVE = 1 << 0
     """Indicates that the particle is active."""
 
-    FIXED = 1 << 1
-    """Indicates that the particle is fixed in based on initial conditions."""
-
-
 # Shape flags
 class ShapeFlags(IntEnum):
     """
