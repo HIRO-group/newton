@@ -824,44 +824,106 @@ def solve_shape_matching(
         x = particle_q[i]
         goal = R @ (x0 - t0) + t
         dx = (goal - x)
-        local_delta[i] = dx
+        wp.atomic_add(delta, i, dx)
 
-    # Enforce conservation of linear momentum
-    linear_correction = wp.vec3(0.0, 0.0, 0.0)
-    for i in range(particle_count):
-        m = particle_mass[i]
-        linear_correction += local_delta[i] * m
-    linear_correction = linear_correction / tot_w
+    # # Enforce conservation of linear momentum
+    # linear_correction = wp.vec3(0.0, 0.0, 0.0)
+    # for i in range(particle_count):
+    #     m = particle_mass[i]
+    #     linear_correction += local_delta[i] * m
+    # linear_correction = linear_correction / tot_w
 
-    # Enforce conservation of angular momentum
-    angular_momentum = wp.vec3(0.0, 0.0, 0.0)
-    inertia_tensor = wp.mat33(0.0)
+    # # Enforce conservation of angular momentum
+    # angular_momentum = wp.vec3(0.0, 0.0, 0.0)
+    # inertia_tensor = wp.mat33(0.0)
+    
+    # for i in range(particle_count):
+    #     m = particle_mass[i]
+    #     r = particle_q[i] - t
+    #     v = local_delta[i] - linear_correction
+        
+    #     # Accumulate angular momentum from the corrected deltas
+    #     angular_momentum += wp.cross(r, m * v)
+        
+    #     # Build inertia tensor about center of mass
+    #     r_outer = wp.outer(r, r)
+    #     r_sq = wp.dot(r, r)
+    #     inertia_tensor += m * (r_sq * wp.mat33(1.0, 0.0, 0.0,
+    #                                              0.0, 1.0, 0.0,
+    #                                              0.0, 0.0, 1.0) - r_outer)
+    # # Compute angular velocity correction needed to cancel angular momentum
+    # # L = I * omega, so omega = I^-1 * L
+    # inertia_inv = wp.inverse(inertia_tensor)
+    # omega = inertia_inv @ angular_momentum
+    
+    # # Apply both linear and angular momentum corrections
+    # for i in range(particle_count):
+    #     r = particle_q[i] - t
+    #     angular_correction = wp.cross(omega, r)
+    #     wp.atomic_add(delta, i, local_delta[i] - linear_correction - angular_correction)
+
+@wp.kernel
+def match_momentum(
+    particle_q: wp.array(dtype=wp.vec3),
+    particle_qd: wp.array(dtype=wp.vec3),
+    particle_mass: wp.array(dtype=float),
+    particle_count: int,
+    target_angular_momentum: wp.vec3,
+    target_linear_momentum: wp.vec3,
+    dt: float,
+    particle_q_out: wp.array(dtype=wp.vec3),
+    particle_qd_out: wp.array(dtype=wp.vec3),
+):
+    tot_mass = float(0.0)
+    com = wp.vec3(0.0)
+    com_vel = wp.vec3(0.0)
     
     for i in range(particle_count):
         m = particle_mass[i]
-        r = particle_q[i] - t
-        v = local_delta[i] - linear_correction
+        x = particle_q[i]
+        v = particle_qd[i]
+        tot_mass += m
+        com += m * x
+        com_vel += m * v
+    
+    com /= tot_mass
+    com_vel /= tot_mass
+
+    # Compute current momenta
+    P = wp.vec3(0.0)
+    L = wp.vec3(0.0)
+    I = wp.mat33(0.0)
+    I_identity = wp.mat33(1.0, 0.0, 0.0,
+                          0.0, 1.0, 0.0,
+                          0.0, 0.0, 1.0)
+    
+    for i in range(particle_count):
+        m = particle_mass[i]
+        r = particle_q[i] - com
+        v = particle_qd[i]
         
-        # Accumulate angular momentum from the corrected deltas
-        angular_momentum += wp.cross(r, m * v)
+        P += m * v
+        L += wp.cross(r, m * v)
         
-        # Build inertia tensor about center of mass
         r_outer = wp.outer(r, r)
         r_sq = wp.dot(r, r)
-        inertia_tensor += m * (r_sq * wp.mat33(1.0, 0.0, 0.0,
-                                                 0.0, 1.0, 0.0,
-                                                 0.0, 0.0, 1.0) - r_outer)
+        I += m * (r_sq * I_identity - r_outer)
+
+    # Add regularization
+    I += I_identity * (tot_mass * 1e-8)
+
+    # Compute corrections
+    dP = target_linear_momentum - P
+    dL = target_angular_momentum - L
     
-    # Compute angular velocity correction needed to cancel angular momentum
-    # L = I * omega, so omega = I^-1 * L
-    inertia_inv = wp.inverse(inertia_tensor)
-    omega = inertia_inv @ angular_momentum
-    
-    # Apply both linear and angular momentum corrections
+    v_correction = dP / tot_mass
+    omega_correction = wp.inverse(I) @ dL
+
+    # Apply corrections - ONLY to velocity, NOT position
     for i in range(particle_count):
-        r = particle_q[i] - t
-        angular_correction = wp.cross(omega, r)
-        wp.atomic_add(delta, i, local_delta[i] - linear_correction - angular_correction)
+        r = particle_q[i] - com
+        particle_q_out[i] = particle_q[i]
+        particle_qd_out[i] += v_correction + wp.cross(omega_correction, r)
 
 
 @wp.kernel
@@ -900,11 +962,6 @@ def apply_particle_deltas(
     '''
     v_new = vp + d/dt
     x_new = xp + d
-
-    # enforce velocity limit to prevent instability
-    v_new_mag = wp.length(v_new)
-    if v_new_mag > v_max:
-        v_new *= v_max / v_new_mag
 
     x_out[tid] = x_new
     v_out[tid] = v_new

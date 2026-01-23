@@ -46,10 +46,6 @@ def integrate_particles(
 
     # simple semi-implicit Euler. v1 = v0 + a dt, x1 = x0 + v1 dt
     v1 = v0 + (f0 * inv_mass + gravity[0] * wp.nonzero(inv_mass)) * dt
-    # enforce velocity limit to prevent instability
-    v1_mag = wp.length(v1)
-    if v1_mag > v_max:
-        v1 *= v_max / v1_mag
     x1 = x0 + v1 * dt
 
     x_new[tid] = x1
