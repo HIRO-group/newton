@@ -5480,13 +5480,14 @@ class ModelBuilder:
         else:
             vel = wp.vec3(*vel)
 
-        # Add particles
-        rng = np.random.default_rng(42)
-        # num_added = 0
+        # Register new particle group BEFORE adding particles
+        group_id = self.particle_group_count
+        self.particle_group_count += 1
+        particle_start_idx = len(self.particle_q)
 
+        # Add particles
         for point, radius in zip(centers, radii):
-            
-            # Calculate the mass of this particle based on it's volume relative
+            # Calculate the mass of this particle based on its volume relative
             # to the total volume
             particle_volume = 4.0 / 3.0 * np.pi * (radius ** 3)
             mass = total_mass * (particle_volume / total_volume)
@@ -5498,6 +5499,17 @@ class ModelBuilder:
             point_rotated_and_offset = wp.quat_rotate(rot, point_vec) + pos
 
             self.add_particle(point_rotated_and_offset, vel, mass, radius)
+            
+            # Assign this particle to the group
+            # (add_particle initializes with -1, so we need to update)
+            self.particle_group[-1] = group_id
+        
+        particle_end_idx = len(self.particle_q)
+        
+        # Store reverse mapping
+        self.particle_groups[group_id] = list(range(particle_start_idx, particle_end_idx))
+
+        return group_id
 
 
     def add_soft_grid(
