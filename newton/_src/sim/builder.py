@@ -1640,7 +1640,8 @@ class ModelBuilder:
             self.particle_q.extend((np.array(builder.particle_q) + pos_offset).tolist())
             # other particle attributes are added below
 
-            # Merge particle groups with offset
+            # Merge particle groups in the new builder with the groups in the existing builder
+            # This is the "starting point" for the new builder's group IDs
             group_offset = self.particle_group_count
             for old_group_id, particle_indices in builder.particle_groups.items():
                 new_group_id = old_group_id + group_offset
@@ -1649,8 +1650,9 @@ class ModelBuilder:
                 self.particle_groups[new_group_id] = new_indices
             
             self.particle_group_count += builder.particle_group_count
-            
+
             # Extend particle_group array with offset group IDs
+            # -1 (ungrouped) stays -1, but valid groups get offset
             offset_groups = [g + group_offset if g >= 0 else -1 for g in builder.particle_group]
             self.particle_group.extend(offset_groups)
 
