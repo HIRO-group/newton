@@ -6,9 +6,10 @@ from ...sim import Contacts, Control, Model, State
 from ..solver import SolverBase
 from .kernels import (
     apply_particle_deltas,
+    apply_deltas_particles_for_shape_matching,
     solve_particle_shape_contacts,
     solve_shape_matching,
-    match_momentum,
+    # remove_momentum_from_shape_matching_d
 )
 
 
@@ -31,7 +32,6 @@ def compute_linear_momentum(particle_qd, particle_m):
     """
     linear_momentum = np.sum(particle_m[:, None] * particle_qd, axis=0)
     return wp.vec3(float(linear_momentum[0]), float(linear_momentum[1]), float(linear_momentum[2]))
-
 
 
 class SolverSRXPBD(SolverBase):
@@ -62,7 +62,8 @@ class SolverSRXPBD(SolverBase):
 
         # helper variables to track constraint resolution vars
         self._particle_delta_counter = 0
-        self.particle_q_rest = wp.clone(model.particle_q)   # clone instead of reference
+        self.particle_q_rest = wp.clone(
+            model.particle_q)   # clone instead of reference
 
     def apply_particle_deltas(
         self,
@@ -71,6 +72,7 @@ class SolverSRXPBD(SolverBase):
         state_out: State,
         particle_deltas: wp.array,
         dt: float,
+        shape_matching: bool = False,
     ):
         if state_in.requires_grad:
             particle_q = state_out.particle_q
@@ -92,21 +94,41 @@ class SolverSRXPBD(SolverBase):
                 new_particle_qd = state_out.particle_qd
             self._particle_delta_counter = 1 - self._particle_delta_counter
 
-        wp.launch(
-            kernel=apply_particle_deltas,
-            dim=model.particle_count,
-            inputs=[
-                self.particle_q_init,
-                particle_q,
-                particle_qd, 
-                model.particle_flags,
-                particle_deltas,
-                dt,
-                model.particle_max_velocity,
-            ],
-            outputs=[new_particle_q, new_particle_qd],
-            device=model.device,
-        )
+        if not shape_matching:
+            wp.launch(
+                kernel=apply_particle_deltas,
+                dim=model.particle_count,
+                inputs=[
+                    self.particle_q_init,
+                    particle_q,
+                    particle_qd,
+                    model.particle_flags,
+                    particle_deltas,
+                    dt,
+                    model.particle_max_velocity,
+                ],
+                outputs=[new_particle_q, new_particle_qd],
+                device=model.device,
+            )
+        elif shape_matching:
+            wp.launch(
+                kernel=apply_deltas_particles_for_shape_matching,
+                dim=1,
+                inputs=[
+                    particle_q,
+                    particle_qd,
+                    model.particle_flags,
+                    particle_deltas,
+                    model.particle_mass,
+                    model.particle_count,
+                    self.linear_momentum,
+                    self.angular_momentum,
+                    dt,
+                ],
+                outputs=[new_particle_q, new_particle_qd],
+                device=model.device,
+
+            )
 
         if state_in.requires_grad:
             state_out.particle_q = new_particle_q
@@ -137,16 +159,6 @@ class SolverSRXPBD(SolverBase):
                 self.particle_qd_init = wp.clone(state_in.particle_qd)
                 particle_deltas = wp.empty_like(state_out.particle_qd)
                 self.integrate_particles(model, state_in, state_out, dt)
-                
-                angular_momentum = compute_angular_momentum(
-                    particle_q=state_out.particle_q.numpy(),
-                    particle_qd=state_out.particle_qd.numpy(),
-                    particle_m=model.particle_mass.numpy(),
-                )
-                linear_momentum = compute_linear_momentum(
-                    particle_qd=state_out.particle_qd.numpy(),
-                    particle_m=model.particle_mass.numpy(),
-                )
 
             if model.body_count:
                 body_q = state_out.body_q
@@ -160,45 +172,51 @@ class SolverSRXPBD(SolverBase):
                             particle_deltas = wp.zeros_like(particle_deltas)
                         else:
                             particle_deltas.zero_()
-                        # if model.shape_count:
-                        #     wp.launch(
-                        #         kernel=solve_particle_shape_contacts,
-                        #         dim=contacts.soft_contact_max,
-                        #         inputs=[
-                        #             particle_q,
-                        #             particle_qd,
-                        #             model.particle_inv_mass,
-                        #             model.particle_radius,
-                        #             model.particle_flags,
-                        #             state_out.body_q,
-                        #             state_out.body_qd,
-                        #             model.body_com,
-                        #             model.body_inv_mass,
-                        #             model.body_inv_inertia,
-                        #             model.shape_body,
-                        #             model.shape_material_mu,
-                        #             model.soft_contact_mu,
-                        #             model.particle_adhesion,
-                        #             contacts.soft_contact_count,
-                        #             contacts.soft_contact_particle,
-                        #             contacts.soft_contact_shape,
-                        #             contacts.soft_contact_body_pos,
-                        #             contacts.soft_contact_body_vel,
-                        #             contacts.soft_contact_normal,
-                        #             contacts.soft_contact_max,
-                        #             dt,
-                        #             self.soft_contact_relaxation,
-                        #         ],
-                        #         # outputs
-                        #         outputs=[particle_deltas, body_deltas],
-                        #         device=model.device,
-                        # )
-                        # particle_q, particle_qd = self.apply_particle_deltas(
-                        #     model, state_in, state_out, particle_deltas, dt
-                        # )
-            
+                        if model.shape_count:
+                            wp.launch(
+                                kernel=solve_particle_shape_contacts,
+                                dim=contacts.soft_contact_max,
+                                inputs=[
+                                    particle_q,
+                                    particle_qd,
+                                    model.particle_inv_mass,
+                                    model.particle_radius,
+                                    model.particle_flags,
+                                    state_out.body_q,
+                                    state_out.body_qd,
+                                    model.body_com,
+                                    model.body_inv_mass,
+                                    model.body_inv_inertia,
+                                    model.shape_body,
+                                    model.shape_material_mu,
+                                    model.soft_contact_mu,
+                                    model.particle_adhesion,
+                                    contacts.soft_contact_count,
+                                    contacts.soft_contact_particle,
+                                    contacts.soft_contact_shape,
+                                    contacts.soft_contact_body_pos,
+                                    contacts.soft_contact_body_vel,
+                                    contacts.soft_contact_normal,
+                                    contacts.soft_contact_max,
+                                    dt,
+                                    self.soft_contact_relaxation,
+                                ],
+                                outputs=[particle_deltas, body_deltas],
+                                device=model.device
+                            )
+                            particle_q, particle_qd = self.apply_particle_deltas(
+                                model, state_in, state_out, particle_deltas, dt, shape_matching=False)
+
             if model.particle_count:
-                local_delta = wp.zeros_like(particle_deltas)
+                self.angular_momentum = compute_angular_momentum(
+                    particle_q=state_out.particle_q.numpy(),
+                    particle_qd=state_out.particle_qd.numpy(),
+                    particle_m=model.particle_mass.numpy())
+                self.linear_momentum = compute_linear_momentum(
+                    particle_qd=state_out.particle_qd.numpy(),
+                    particle_m=model.particle_mass.numpy())
+
+                particle_deltas.zero_()
                 wp.launch(
                     kernel=solve_shape_matching,
                     dim=1,
@@ -207,51 +225,36 @@ class SolverSRXPBD(SolverBase):
                         self.particle_q_rest,
                         model.particle_mass,
                         model.particle_count,
-                        local_delta,
                     ],
                     outputs=[particle_deltas],
                     device=model.device
                 )
+
                 particle_q, particle_qd = self.apply_particle_deltas(
-                    model, state_in, state_out, particle_deltas, dt
+                    model, state_in, state_out, particle_deltas, dt, shape_matching=True
                 )
-                
-                particle_q_o = wp.clone(particle_q)
-                particle_qd_o = wp.clone(particle_qd)
-                wp.launch(
-                    kernel=match_momentum,
-                    dim=1,
-                    inputs=[
-                        particle_q,
-                        particle_qd,
-                        model.particle_mass,
-                        model.particle_count,
-                        angular_momentum,
-                        linear_momentum,
-                        dt,
-                        ],
-                    outputs=[particle_q_o, particle_qd_o],
-                    device=model.device
-                )
-                particle_q = particle_q_o
-                particle_qd = particle_qd_o
-                
-                
-                ang_momentum_after = compute_angular_momentum(
-                    particle_q=particle_q.numpy(),
-                    particle_qd=particle_qd.numpy(),
-                    particle_m=model.particle_mass.numpy(),
-                )
-                linear_momentum_after = compute_linear_momentum(
-                    particle_qd=particle_qd.numpy(),
-                    particle_m=model.particle_mass.numpy(),
-                )
-                # conver ang momentum to numpy
-                print("Angular momentum error:", ang_momentum_after - angular_momentum)
-                print("Linear momentum error:", linear_momentum_after - linear_momentum)
+
+            # ang_momentum_after = compute_angular_momentum(
+            #     particle_q=particle_q.numpy(),
+            #     particle_qd=particle_qd.numpy(),
+            #     particle_m=model.particle_mass.numpy(),
+            # )
+            # linear_momentum_after = compute_linear_momentum(
+            #     particle_qd=particle_qd.numpy(),
+            #     particle_m=model.particle_mass.numpy(),
+            # )
+            # L0 = np.array(self.angular_momentum, dtype=np.float32)
+            # dL = np.array(ang_momentum_after, dtype=np.float32) - L0
+            # rel = np.linalg.norm(dL) / (np.linalg.norm(L0) + 1e-30)
+            # P0 = np.array(self.linear_momentum, dtype=np.float32)
+            # dP = np.array(linear_momentum_after, dtype=np.float32) - P0
+            # rel_P = np.linalg.norm(dP) / (np.linalg.norm(P0) + 1e-30)
+            # print("||dL||:", np.linalg.norm(dL), " ||dP||:", np.linalg.norm(dP))
+            # print("relative:", rel, " relative_P:", rel_P)
+            # print("---------------------------------------------------")
 
             if model.particle_count:
-                # if particle_q.ptr != state_out.particle_q.ptr:
+                if particle_q.ptr != state_out.particle_q.ptr:
                     state_out.particle_q.assign(particle_q)
                     state_out.particle_qd.assign(particle_qd)
 
