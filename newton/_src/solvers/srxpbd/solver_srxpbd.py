@@ -177,7 +177,6 @@ class SolverSRXPBD(SolverBase):
                         else:
                             particle_deltas.zero_()
 
-                        # NOTE: order in which constraints are applied matters, they are ordered "least to most" important
                         # 1. Particle-shape contacts prevents particles from penetrating static/dynamic shapes in the scene
                         # 2. Particle-particle contacts handles collisions between particles in different rigid bodies (i.e. groups)
                         # 3. Shape matching constraints ensures rigid body behavior
