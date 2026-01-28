@@ -516,6 +516,9 @@ class ModelBuilder:
         self.particle_max_velocity = 1e5
         self.particle_color_groups: list[nparray] = []
         self.particle_world = []  # world index for each particle
+        self.particle_group = []  # group ID for each particle (-1 for ungrouped)
+        self.particle_groups = {}  # mapping from group ID to particle indices
+        self.particle_group_count = 0  # number of particle groups
 
         # shapes (each shape has an entry in these arrays)
         self.shape_key = []  # shape keys
@@ -1636,6 +1639,23 @@ class ModelBuilder:
                 pos_offset = np.zeros(3)
             self.particle_q.extend((np.array(builder.particle_q) + pos_offset).tolist())
             # other particle attributes are added below
+
+            # Merge particle groups in the new builder with the groups in the existing builder
+            # This is the "starting point" for the new builder's group IDs
+            group_offset = self.particle_group_count
+            for old_group_id, particle_indices in builder.particle_groups.items():
+                new_group_id = old_group_id + group_offset
+                # Offset particle indices
+                new_indices = [idx + start_particle_idx for idx in particle_indices]
+                self.particle_groups[new_group_id] = new_indices
+            
+            self.particle_group_count += builder.particle_group_count
+
+            # Extend particle_group array with offset group IDs
+            # -1 (ungrouped) stays -1, but valid groups get offset
+            offset_groups = [g + group_offset if g >= 0 else -1 for g in builder.particle_group]
+            self.particle_group.extend(offset_groups)
+
 
         if builder.spring_count:
             self.spring_indices.extend((np.array(builder.spring_indices, dtype=np.int32) + start_particle_idx).tolist())
@@ -4593,6 +4613,8 @@ class ModelBuilder:
         self.particle_radius.append(radius)
         self.particle_flags.append(flags)
         self.particle_world.append(self.current_world)
+        # Particle is not part of a group 
+        self.particle_group.append(-1)
 
         particle_id = self.particle_count - 1
 
@@ -4629,6 +4651,9 @@ class ModelBuilder:
         self.particle_flags.extend(flags)
         # Maintain world assignment for bulk particle creation
         self.particle_world.extend([self.current_world] * len(pos))
+        # All particles being added here are initialized as not belonging to a group
+        self.particle_group.extend([-1] * len(pos))
+
 
     def add_spring(self, i: int, j, ke: float, kd: float, control: float):
         """Adds a spring between two particles in the system
@@ -5455,13 +5480,14 @@ class ModelBuilder:
         else:
             vel = wp.vec3(*vel)
 
-        # Add particles
-        rng = np.random.default_rng(42)
-        # num_added = 0
+        # Register new particle group BEFORE adding particles
+        group_id = self.particle_group_count
+        self.particle_group_count += 1
+        particle_start_idx = len(self.particle_q)
 
+        # Add particles
         for point, radius in zip(centers, radii):
-            
-            # Calculate the mass of this particle based on it's volume relative
+            # Calculate the mass of this particle based on its volume relative
             # to the total volume
             particle_volume = 4.0 / 3.0 * np.pi * (radius ** 3)
             mass = total_mass * (particle_volume / total_volume)
@@ -5473,6 +5499,17 @@ class ModelBuilder:
             point_rotated_and_offset = wp.quat_rotate(rot, point_vec) + pos
 
             self.add_particle(point_rotated_and_offset, vel, mass, radius)
+            
+            # Assign this particle to the group
+            # (add_particle initializes with -1, so we need to update)
+            self.particle_group[-1] = group_id
+        
+        particle_end_idx = len(self.particle_q)
+        
+        # Store reverse mapping
+        self.particle_groups[group_id] = list(range(particle_start_idx, particle_end_idx))
+
+        return group_id
 
 
     def add_soft_grid(
@@ -6006,6 +6043,12 @@ class ModelBuilder:
             m.particle_world = wp.array(self.particle_world, dtype=wp.int32)
             m.particle_max_radius = np.max(self.particle_radius) if len(self.particle_radius) > 0 else 0.0
             m.particle_max_velocity = self.particle_max_velocity
+            m.particle_group = wp.array(self.particle_group, dtype=wp.int32)
+            m.particle_groups = {
+                gid: wp.array(indices, dtype=wp.int32) 
+                for gid, indices in self.particle_groups.items()
+            }
+            m.particle_group_count = self.particle_group_count
 
             particle_colors = np.empty(self.particle_count, dtype=int)
             for color in range(len(self.particle_color_groups)):

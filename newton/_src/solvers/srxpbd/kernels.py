@@ -231,6 +231,7 @@ def solve_particle_particle_contacts(
     particle_invmass: wp.array(dtype=float),
     particle_radius: wp.array(dtype=float),
     particle_flags: wp.array(dtype=wp.int32),
+    particle_group: wp.array(dtype=wp.int32),
     k_mu: float,
     k_cohesion: float,
     max_radius: float,
@@ -261,6 +262,15 @@ def solve_particle_particle_contacts(
     delta = wp.vec3(0.0)
 
     while wp.hash_grid_query_next(query, index):
+        # Only collide with particles from different groups (inter-group collisions are 
+        # handled by shape matching)
+        my_group = particle_group[i]
+        other_group = particle_group[index]
+
+        # Skip if same group
+        if my_group >= 0 and my_group == other_group:
+            continue
+
         if (particle_flags[index] & ParticleFlags.ACTIVE) != 0 and index != i:
             # compute distance to point
             n = x - particle_x[index]
@@ -775,21 +785,46 @@ def solve_tetrahedra2(
 
 
 @wp.kernel
-def solve_shape_matching(
+def solve_shape_matching_batch(
     particle_q: wp.array(dtype=wp.vec3),
     particle_q_rest: wp.array(dtype=wp.vec3),
     particle_mass: wp.array(dtype=float),
-    particle_count: int,
+    group_particle_start: wp.array(dtype=wp.int32),
+    group_particle_count: wp.array(dtype=wp.int32),
+    group_particles_flat: wp.array(dtype=wp.int32),
     local_delta: wp.array(dtype=wp.vec3),
     delta: wp.array(dtype=wp.vec3),
 ):
+    """
+    Solve shape matching constraints for a batch of groups.
+    
+    Args:
+        particle_q: Current particle positions
+        particle_q_rest: Rest particle positions
+        particle_mass: Particle masses 
+        group_particle_start: Start index of each group's particles in the flat array
+        group_particle_count: Number of particles in each group
+        group_particles_flat: Flattened array of all group particle indices
+        local_delta: Local delta array to store intermediate results
+        delta: Output delta array to accumulate results
+    """
+
+    # Each thread handles one group
+    group_id = wp.tid()
+
+    start_idx = group_particle_start[group_id]
+    num_particles = group_particle_count[group_id]
+
     tot_w = float(0.0)
     t = wp.vec3(0.0)
     t0 = wp.vec3(0.0)
-    for i in range(particle_count):
-        w = particle_mass[i]
-        x = particle_q[i]
-        x0 = particle_q_rest[i]
+
+    for i in range(num_particles):
+        # Get particle index
+        idx = group_particles_flat[start_idx + i]
+        w = particle_mass[idx]
+        x = particle_q[idx]
+        x0 = particle_q_rest[idx]
 
         tot_w += w
         t += w * x
@@ -800,10 +835,11 @@ def solve_shape_matching(
 
     # covariance A
     A = wp.mat33(0.0)
-    for i in range(particle_count):
-        w = particle_mass[i]
-        x = particle_q[i]
-        x0 = particle_q_rest[i]
+    for i in range(num_particles):
+        idx = group_particles_flat[start_idx + i]
+        w = particle_mass[idx]
+        x = particle_q[idx]
+        x0 = particle_q_rest[idx]
         pi = x - t
         qi = x0 - t0
         A += wp.outer(pi, qi) * w
@@ -818,29 +854,32 @@ def solve_shape_matching(
     if (wp.determinant(R) < 0.0):
         U[:,2] = -U[:,2]
         R = U @ wp.transpose(V)
-    
-    for i in range(particle_count):
-        x0 = particle_q_rest[i]
-        x = particle_q[i]
+
+    for i in range(num_particles):
+        idx = group_particles_flat[start_idx + i]
+        x0 = particle_q_rest[idx]
+        x = particle_q[idx]
         goal = R @ (x0 - t0) + t
         dx = (goal - x)
-        local_delta[i] = dx
+        local_delta[idx] = dx
 
     # Enforce conservation of linear momentum
     linear_correction = wp.vec3(0.0, 0.0, 0.0)
-    for i in range(particle_count):
-        m = particle_mass[i]
-        linear_correction += local_delta[i] * m
+    for i in range(num_particles):
+        idx = group_particles_flat[start_idx + i]
+        m = particle_mass[idx]
+        linear_correction += local_delta[idx] * m
     linear_correction = linear_correction / tot_w
 
     # Enforce conservation of angular momentum
     angular_momentum = wp.vec3(0.0, 0.0, 0.0)
     inertia_tensor = wp.mat33(0.0)
     
-    for i in range(particle_count):
-        m = particle_mass[i]
-        r = particle_q[i] - t
-        v = local_delta[i] - linear_correction
+    for i in range(num_particles):
+        idx = group_particles_flat[start_idx + i]
+        m = particle_mass[idx]
+        r = particle_q[idx] - t
+        v = local_delta[idx] - linear_correction
         
         # Accumulate angular momentum from the corrected deltas
         angular_momentum += wp.cross(r, m * v)
@@ -858,10 +897,11 @@ def solve_shape_matching(
     omega = inertia_inv @ angular_momentum
     
     # Apply both linear and angular momentum corrections
-    for i in range(particle_count):
-        r = particle_q[i] - t
+    for i in range(num_particles):
+        idx = group_particles_flat[start_idx + i]
+        r = particle_q[idx] - t
         angular_correction = wp.cross(omega, r)
-        wp.atomic_add(delta, i, local_delta[i] - linear_correction - angular_correction)
+        wp.atomic_add(delta, idx, local_delta[idx] - linear_correction - angular_correction)
 
 
 @wp.kernel
@@ -870,6 +910,7 @@ def apply_particle_deltas(
     x_pred: wp.array(dtype=wp.vec3),
     v_pred: wp.array(dtype=wp.vec3),
     particle_flags: wp.array(dtype=wp.int32),
+    particle_mass: wp.array(dtype=float),
     delta: wp.array(dtype=wp.vec3),
     dt: float,
     v_max: float,
@@ -877,6 +918,14 @@ def apply_particle_deltas(
     v_out: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
+
+    # Static particles (mass=0) don't move - just preserve current state
+    if particle_mass[tid] == 0.0:
+        x_out[tid] = x_pred[tid]
+        v_out[tid] = wp.vec3(0.0, 0.0, 0.0)
+        return
+
+    # Inactive particles do not move
     if (particle_flags[tid] & ParticleFlags.ACTIVE) == 0:
         return
 

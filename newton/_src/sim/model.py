@@ -422,6 +422,12 @@ class Model:
         self.equality_constraint_world = None
         """World index for each constraint, shape [equality_constraint_count], int."""
 
+        self.particle_group = None
+        """Maps each particle to its group ID using particle index (-1 for ungrouped particles) e.g. particle_group[0] returns the group id of particle 0"""
+        self.particle_groups = {}
+        """Maps group_id -> list of particle indices"""
+        self.particle_group_count = 0
+        """Total number of particle groups"""
         self.particle_count = 0
         """Total number of particles in the system."""
         self.body_count = 0

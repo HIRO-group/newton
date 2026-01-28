@@ -25,7 +25,6 @@ class ParticleFlags(IntEnum):
     ACTIVE = 1 << 0
     """Indicates that the particle is active."""
 
-
 # Shape flags
 class ShapeFlags(IntEnum):
     """
