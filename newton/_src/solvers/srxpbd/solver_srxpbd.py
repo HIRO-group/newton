@@ -178,57 +178,9 @@ class SolverSRXPBD(SolverBase):
                             particle_deltas.zero_()
 
                         # NOTE: order in which constraints are applied matters, they are ordered "least to most" important
-                        # 1. Shape matching constraints ensures rigid body behavior
+                        # 1. Particle-shape contacts prevents particles from penetrating static/dynamic shapes in the scene
                         # 2. Particle-particle contacts handles collisions between particles in different rigid bodies (i.e. groups)
-                        # 3. Particle-shape contacts prevents particles from penetrating static/dynamic shapes in the scene
-
-                        # Solve shape matching for ALL dynamic groups in one kernel launch
-                        if self._num_dynamic_groups > 0:
-                            local_delta = wp.zeros_like(particle_deltas)
-
-                            wp.launch(
-                                kernel=solve_shape_matching_batch,
-                                # One thread per dynamic group
-                                dim=self._num_dynamic_groups,
-                                inputs=[
-                                    particle_q, 
-                                    self.particle_q_rest,
-                                    model.particle_mass,
-                                    self._group_particle_start,
-                                    self._group_particle_count,
-                                    self._group_particles_flat,
-                                    local_delta,
-                                ],
-                                outputs=[particle_deltas],
-                                device=model.device
-                            )
-
-                        # Solve particle-particle contacts (inter-group collisions)
-                        # Need at least 2 groups to collide
-                        if model.particle_group_count > 1:
-                            # Build hash grid for spatial queries
-                            model.particle_grid.build(particle_q, model.particle_max_radius)
-                            
-                            wp.launch(
-                                kernel=solve_particle_particle_contacts,
-                                dim=model.particle_count,
-                                inputs=[
-                                    model.particle_grid.id,
-                                    particle_q,
-                                    particle_qd,
-                                    model.particle_inv_mass,
-                                    model.particle_radius,
-                                    model.particle_flags,
-                                    model.particle_group,
-                                    model.particle_mu,
-                                    model.particle_cohesion,
-                                    model.particle_max_radius,
-                                    dt,
-                                    self.soft_contact_relaxation,
-                                ],
-                                outputs=[particle_deltas],
-                                device=model.device,
-                            )
+                        # 3. Shape matching constraints ensures rigid body behavior
 
                         # Solve contact constraints
                         if model.shape_count:
@@ -263,6 +215,54 @@ class SolverSRXPBD(SolverBase):
                                 # outputs
                                 outputs=[particle_deltas, body_deltas],
                                 device=model.device,
+                            )
+
+                        # Solve particle-particle contacts (inter-group collisions)
+                        # Need at least 2 groups to collide
+                        if model.particle_group_count > 1:
+                            # Build hash grid for spatial queries
+                            model.particle_grid.build(particle_q, model.particle_max_radius)
+
+                            wp.launch(
+                                kernel=solve_particle_particle_contacts,
+                                dim=model.particle_count,
+                                inputs=[
+                                    model.particle_grid.id,
+                                    particle_q,
+                                    particle_qd,
+                                    model.particle_inv_mass,
+                                    model.particle_radius,
+                                    model.particle_flags,
+                                    model.particle_group,
+                                    model.particle_mu,
+                                    model.particle_cohesion,
+                                    model.particle_max_radius,
+                                    dt,
+                                    self.soft_contact_relaxation,
+                                ],
+                                outputs=[particle_deltas],
+                                device=model.device,
+                            )
+
+                        # Solve shape matching for ALL dynamic groups in one kernel launch
+                        if self._num_dynamic_groups > 0:
+                            local_delta = wp.zeros_like(particle_deltas)
+
+                            wp.launch(
+                                kernel=solve_shape_matching_batch,
+                                # One thread per dynamic group
+                                dim=self._num_dynamic_groups,
+                                inputs=[
+                                    particle_q, 
+                                    self.particle_q_rest,
+                                    model.particle_mass,
+                                    self._group_particle_start,
+                                    self._group_particle_count,
+                                    self._group_particles_flat,
+                                    local_delta,
+                                ],
+                                outputs=[particle_deltas],
+                                device=model.device
                             )
 
                         # Apply all accumulated deltas at once
