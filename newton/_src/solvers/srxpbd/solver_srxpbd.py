@@ -9,13 +9,10 @@ from .kernels import (
     apply_deltas_particles_for_shape_matching,
     solve_particle_shape_contacts,
     solve_shape_matching,
-    # remove_momentum_from_shape_matching_d
 )
 
 
 def compute_angular_momentum(particle_q, particle_qd, particle_m):
-    """
-    """
     M = particle_m.sum()
     com = np.sum(particle_q * particle_m[:, None], axis=0) / M
     vcom = np.sum(particle_qd * particle_m[:, None], axis=0) / M
@@ -27,9 +24,6 @@ def compute_angular_momentum(particle_q, particle_qd, particle_m):
 
 
 def compute_linear_momentum(particle_qd, particle_m):
-    """
-    Compute total linear momentum of particles.
-    """
     linear_momentum = np.sum(particle_m[:, None] * particle_qd, axis=0)
     return wp.vec3(float(linear_momentum[0]), float(linear_momentum[1]), float(linear_momentum[2]))
 
@@ -62,8 +56,7 @@ class SolverSRXPBD(SolverBase):
 
         # helper variables to track constraint resolution vars
         self._particle_delta_counter = 0
-        self.particle_q_rest = wp.clone(
-            model.particle_q)   # clone instead of reference
+        self.particle_q_rest = wp.clone(model.particle_q)
 
     def apply_particle_deltas(
         self,
@@ -140,9 +133,7 @@ class SolverSRXPBD(SolverBase):
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
         requires_grad = state_in.requires_grad
         self._particle_delta_counter = 0
-
         model = self.model
-
         particle_q = None
         particle_qd = None
         particle_deltas = None
@@ -215,7 +206,6 @@ class SolverSRXPBD(SolverBase):
                 self.linear_momentum = compute_linear_momentum(
                     particle_qd=state_out.particle_qd.numpy(),
                     particle_m=model.particle_mass.numpy())
-
                 particle_deltas.zero_()
                 wp.launch(
                     kernel=solve_shape_matching,
@@ -229,29 +219,9 @@ class SolverSRXPBD(SolverBase):
                     outputs=[particle_deltas],
                     device=model.device
                 )
-
                 particle_q, particle_qd = self.apply_particle_deltas(
                     model, state_in, state_out, particle_deltas, dt, shape_matching=True
                 )
-
-            # ang_momentum_after = compute_angular_momentum(
-            #     particle_q=particle_q.numpy(),
-            #     particle_qd=particle_qd.numpy(),
-            #     particle_m=model.particle_mass.numpy(),
-            # )
-            # linear_momentum_after = compute_linear_momentum(
-            #     particle_qd=particle_qd.numpy(),
-            #     particle_m=model.particle_mass.numpy(),
-            # )
-            # L0 = np.array(self.angular_momentum, dtype=np.float32)
-            # dL = np.array(ang_momentum_after, dtype=np.float32) - L0
-            # rel = np.linalg.norm(dL) / (np.linalg.norm(L0) + 1e-30)
-            # P0 = np.array(self.linear_momentum, dtype=np.float32)
-            # dP = np.array(linear_momentum_after, dtype=np.float32) - P0
-            # rel_P = np.linalg.norm(dP) / (np.linalg.norm(P0) + 1e-30)
-            # print("||dL||:", np.linalg.norm(dL), " ||dP||:", np.linalg.norm(dP))
-            # print("relative:", rel, " relative_P:", rel_P)
-            # print("---------------------------------------------------")
 
             if model.particle_count:
                 if particle_q.ptr != state_out.particle_q.ptr:

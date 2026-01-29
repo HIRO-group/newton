@@ -825,7 +825,6 @@ def solve_shape_matching(
         dx = (goal - x)
         wp.atomic_add(delta, i, dx)
 
-
     # Enforce conservation of linear momentum
     # linear_correction = wp.vec3(0.0, 0.0, 0.0)
     # for i in range(particle_count):
@@ -833,7 +832,7 @@ def solve_shape_matching(
     #     linear_correction += delta[i] * m
     # linear_correction = linear_correction / tot_w
 
-    # # Enforce conservation of angular momentum
+    # Enforce conservation of angular momentum
     # angular_momentum = wp.vec3(0.0, 0.0, 0.0)
     # inertia_tensor = wp.mat33(0.0)
     
@@ -893,8 +892,6 @@ def apply_particle_deltas(
     But this leads to inaccurate results for long horizon simulation (such as t=10s). 
     Assume d = 0, then x_new = xp, and v_new = (xp_x0)/dt which must be = vp 
     But due to numerical errors it is not exactly equal to vp, leading to cumulative errors over time.
-    Below update is from shape matching paper which is more accurate:
-    https://graphics.stanford.edu/courses/cs468-05-fall/Papers/p471-muller.pdf
     For example, if d = 0, then v_new = vp exactly. and x_new = xp exactly.
     '''
     v_new = vp + d/dt
@@ -909,7 +906,7 @@ def apply_deltas_particles_for_shape_matching(
     x_pred: wp.array(dtype=wp.vec3),
     v_pred: wp.array(dtype=wp.vec3),
     particle_flags: wp.array(dtype=wp.int32),
-    delta: wp.array(dtype=wp.vec3),          # RAW shape-matching dx (includes rigid components)
+    delta: wp.array(dtype=wp.vec3),          # RAW shape-matching dx
     particle_mass: wp.array(dtype=float),
     particle_count: int,
     target_P: wp.vec3,                       # total linear momentum BEFORE shape matching
@@ -918,6 +915,7 @@ def apply_deltas_particles_for_shape_matching(
     x_out: wp.array(dtype=wp.vec3),
     v_out: wp.array(dtype=wp.vec3),
 ):
+
     tid = wp.tid()
     if tid != 0:
         return
@@ -940,10 +938,6 @@ def apply_deltas_particles_for_shape_matching(
         m = particle_mass[i]
         M += m
         com += m * x_pred[i]
-
-    if M <= 0.0:
-        return
-
     com = com / M
 
     # -------------------------------------------------------------------------
@@ -975,17 +969,13 @@ def apply_deltas_particles_for_shape_matching(
     for i in range(particle_count):
         if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
             continue
-
         m = particle_mass[i]
         r = x_pred[i] - com
         d1 = delta[i] - d_bar
-
         Ld += wp.cross(r, m * d1)
-
         r2 = wp.dot(r, r)
         I += m * (r2 * I3 - wp.outer(r, r))
-
-    I += 1e-12 * I3  # conditioning (degenerate sets)
+    # I += 1e-12 * I3  # conditioning (degenerate sets)
     omega_d = wp.inverse(I) @ Ld
 
     # -------------------------------------------------------------------------
@@ -996,24 +986,22 @@ def apply_deltas_particles_for_shape_matching(
     for i in range(particle_count):
         if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
             continue
-
         r = x_pred[i] - com
         d_corr = (delta[i] - d_bar) - wp.cross(omega_d, r)
-
         x_out[i] = x_pred[i] + d_corr
         v_out[i] = v_pred[i] + d_corr / dt
 
     # -------------------------------------------------------------------------
     # 4) Enforce target linear momentum by adding uniform dv
     # -------------------------------------------------------------------------
+
     Pprime = wp.vec3(0.0)
     for i in range(particle_count):
         if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
             continue
         Pprime += particle_mass[i] * v_out[i]
-
+    
     dv = (target_P - Pprime) / M
-
     for i in range(particle_count):
         if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
             continue
@@ -1027,7 +1015,6 @@ def apply_deltas_particles_for_shape_matching(
     #
     #    omega_err = I^{-1} (Lprime - target_L)
     # -------------------------------------------------------------------------
-    # recompute COM about x_out (optional but safer if constraints moved points)
     com2 = wp.vec3(0.0)
     for i in range(particle_count):
         if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
@@ -1044,9 +1031,17 @@ def apply_deltas_particles_for_shape_matching(
         r = x_out[i] - com2
         r2 = wp.dot(r, r)
         I2 += m * (r2 * I3 - wp.outer(r, r))
-    I2 += 1e-12 * I3
-
-    vcom = target_P / M
+    # I2 += 1e-12 * I3
+    # vcom = target_P / M
+    
+    # Calculate v_com from v_out
+    vcom = wp.vec3(0.0)
+    for i in range(particle_count):
+        if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
+            continue
+        m = particle_mass[i]
+        vcom += m * v_out[i]
+    vcom = vcom / M
 
     Lprime = wp.vec3(0.0)
     for i in range(particle_count):
