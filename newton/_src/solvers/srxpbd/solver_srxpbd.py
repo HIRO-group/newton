@@ -11,24 +11,8 @@ from .kernels import (
     solve_particle_shape_contacts,
     enforce_momemntum_conservation,
     solve_shape_matching_batch,
+    compute_momentum,
 )
-
-
-def compute_angular_momentum(particle_q, particle_qd, particle_m):
-    M = particle_m.sum()
-    com = np.sum(particle_q * particle_m[:, None], axis=0) / M
-    vcom = np.sum(particle_qd * particle_m[:, None], axis=0) / M
-
-    r = particle_q - com[None, :]
-    vrel = particle_qd - vcom[None, :]
-    angular_momentum = np.sum(particle_m[:, None] * np.cross(r, vrel), axis=0)
-    return wp.vec3(float(angular_momentum[0]), float(angular_momentum[1]), float(angular_momentum[2]))
-
-
-def compute_linear_momentum(particle_qd, particle_m):
-    linear_momentum = np.sum(particle_m[:, None] * particle_qd, axis=0)
-    return wp.vec3(float(linear_momentum[0]), float(linear_momentum[1]), float(linear_momentum[2]))
-
 
 class SolverSRXPBD(SolverBase):
     """
@@ -110,9 +94,6 @@ class SolverSRXPBD(SolverBase):
             self._num_dynamic_groups = len(self._dynamic_group_ids.numpy())
         else:
             self._num_dynamic_groups = 0
-        
-        print("SolverSRXPBD: num_dynamic_groups =", self._num_dynamic_groups)
-        print("model.particle_group_count > 0 =", model.particle_group_count)
 
     def apply_particle_deltas(
         self,
@@ -272,15 +253,25 @@ class SolverSRXPBD(SolverBase):
                         )
 
             if self._num_dynamic_groups > 0:
-                angular_momentum_b4_SM = compute_angular_momentum(
-                    particle_q=state_out.particle_q.numpy(),
-                    particle_qd=state_out.particle_qd.numpy(),
-                    particle_m=model.particle_mass.numpy())
-                linear_momentum_b4_SM = compute_linear_momentum(
-                    particle_qd=state_out.particle_qd.numpy(),
-                    particle_m=model.particle_mass.numpy())
-                particle_deltas.zero_()
+                linear_momentum_b4_SM = wp.zeros(self._num_dynamic_groups, dtype=wp.vec3, device=model.device)
+                angular_momentum_b4_SM = wp.zeros(self._num_dynamic_groups, dtype=wp.vec3, device=model.device)
                 wp.launch(
+                    kernel=compute_momentum,
+                    dim=self._num_dynamic_groups,
+                    inputs=[
+                        particle_q,
+                        particle_qd,
+                        model.particle_flags,
+                        model.particle_mass,
+                        self._group_particle_start,
+                        self._group_particle_count,
+                        self._group_particles_flat,
+                    ],
+                    outputs=[linear_momentum_b4_SM, angular_momentum_b4_SM],
+                    device=model.device
+                )
+                particle_deltas.zero_()
+                wp.launch( # Shape matching can be called only once
                     kernel=solve_shape_matching_batch,
                     dim=self._num_dynamic_groups,
                     inputs=[
@@ -297,14 +288,13 @@ class SolverSRXPBD(SolverBase):
                 particle_q, particle_qd = self.apply_particle_deltas(
                     model, state_in, state_out, particle_deltas, dt
                 )
-                for _ in range(3):
+                for _ in range(3): # TODO
                     wp.launch(
                         kernel=enforce_momemntum_conservation,
                         dim=self._num_dynamic_groups,
                         inputs=[
                             particle_q,
                             particle_qd,
-                            model.particle_count,
                             model.particle_flags,
                             model.particle_mass,
                             linear_momentum_b4_SM,

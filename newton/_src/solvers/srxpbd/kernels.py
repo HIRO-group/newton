@@ -812,8 +812,6 @@ def solve_shape_matching_batch(
 
     start_idx = group_particle_start[group_id]
     num_particles = group_particle_count[group_id]
-    
-    wp.printf("Group %d: num_particles = %d\n", group_id, num_particles)
 
     tot_w = float(0.0)
     t = wp.vec3(0.0)
@@ -917,8 +915,8 @@ def enforce_momemntum_conservation(
     v_pred: wp.array(dtype=wp.vec3),    
     particle_flags: wp.array(dtype=wp.int32),
     particle_mass: wp.array(dtype=float),
-    target_P: wp.vec3,
-    target_L: wp.vec3,
+    target_P: wp.array(dtype=wp.vec3),
+    target_L: wp.array(dtype=wp.vec3),
     dt: float,
     group_particle_start: wp.array(dtype=wp.int32),
     group_particle_count: wp.array(dtype=wp.int32),
@@ -947,7 +945,7 @@ def enforce_momemntum_conservation(
             continue
         Pprime += particle_mass[idx] * v_pred[idx]
     
-    dv = (target_P - Pprime) / M
+    dv = (target_P[group_id] - Pprime) / M
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
         if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
@@ -997,7 +995,7 @@ def enforce_momemntum_conservation(
         vrel = v_out[idx] - vcom
         Lprime += wp.cross(r, m * vrel)
 
-    dL = Lprime - target_L
+    dL = Lprime - target_L[group_id]
     omega_err = wp.inverse(I) @ dL
 
     for p in range(num_particles):
@@ -1007,3 +1005,60 @@ def enforce_momemntum_conservation(
         r = x_out[idx] - com
         v_out[idx] = v_out[idx] - wp.cross(omega_err, r)
         x_out[idx] = x_out[idx] - wp.cross(omega_err, r) * dt
+
+
+@wp.kernel
+def compute_momentum(
+    particle_q: wp.array(dtype=wp.vec3),
+    particle_qd: wp.array(dtype=wp.vec3),    
+    particle_flags: wp.array(dtype=wp.int32),
+    particle_mass: wp.array(dtype=float),
+    group_particle_start: wp.array(dtype=wp.int32),
+    group_particle_count: wp.array(dtype=wp.int32),
+    group_particles_flat: wp.array(dtype=wp.int32),
+    out_P: wp.array(dtype=wp.vec3),
+    out_L: wp.array(dtype=wp.vec3),
+):
+    
+    group_id = wp.tid()
+    start_idx = group_particle_start[group_id]
+    num_particles = group_particle_count[group_id]
+    
+    M = float(0.0)
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]    
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
+            continue
+        m = particle_mass[idx]
+        M += m
+
+    # Linear momentum
+    P = wp.vec3(0.0)
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
+            continue
+        P += particle_mass[idx] * particle_qd[idx]
+    
+    com = wp.vec3(0.0)
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
+            continue
+        com += particle_mass[idx] * particle_q[idx]
+    com = com / M
+    vcom = P / M
+    
+    # Angular momentum
+    L = wp.vec3(0.0)
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
+            continue
+        m = particle_mass[idx]
+        r = particle_q[idx] - com
+        vrel = particle_qd[idx] - vcom
+        L += wp.cross(r, m * vrel)
+
+    out_P[group_id] = P
+    out_L[group_id] = L
