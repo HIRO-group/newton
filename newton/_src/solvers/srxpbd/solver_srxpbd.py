@@ -6,9 +6,9 @@ from ...sim import Contacts, Control, Model, State
 from ..solver import SolverBase
 from .kernels import (
     apply_particle_deltas,
-    apply_deltas_particles_for_shape_matching,
     solve_particle_shape_contacts,
     solve_shape_matching,
+    enforce_momemntum_conservation,
 )
 
 
@@ -65,7 +65,6 @@ class SolverSRXPBD(SolverBase):
         state_out: State,
         particle_deltas: wp.array,
         dt: float,
-        shape_matching: bool = False,
     ):
         if state_in.requires_grad:
             particle_q = state_out.particle_q
@@ -87,41 +86,21 @@ class SolverSRXPBD(SolverBase):
                 new_particle_qd = state_out.particle_qd
             self._particle_delta_counter = 1 - self._particle_delta_counter
 
-        if not shape_matching:
-            wp.launch(
-                kernel=apply_particle_deltas,
-                dim=model.particle_count,
-                inputs=[
-                    self.particle_q_init,
-                    particle_q,
-                    particle_qd,
-                    model.particle_flags,
-                    particle_deltas,
-                    dt,
-                    model.particle_max_velocity,
-                ],
-                outputs=[new_particle_q, new_particle_qd],
-                device=model.device,
-            )
-        elif shape_matching:
-            wp.launch(
-                kernel=apply_deltas_particles_for_shape_matching,
-                dim=1,
-                inputs=[
-                    particle_q,
-                    particle_qd,
-                    model.particle_flags,
-                    particle_deltas,
-                    model.particle_mass,
-                    model.particle_count,
-                    self.linear_momentum,
-                    self.angular_momentum,
-                    dt,
-                ],
-                outputs=[new_particle_q, new_particle_qd],
-                device=model.device,
-
-            )
+        wp.launch(
+            kernel=apply_particle_deltas,
+            dim=model.particle_count,
+            inputs=[
+                self.particle_q_init,
+                particle_q,
+                particle_qd,
+                model.particle_flags,
+                particle_deltas,
+                dt,
+                model.particle_max_velocity,
+            ],
+            outputs=[new_particle_q, new_particle_qd],
+            device=model.device,
+        )
 
         if state_in.requires_grad:
             state_out.particle_q = new_particle_q
@@ -196,7 +175,7 @@ class SolverSRXPBD(SolverBase):
                                 device=model.device
                             )
                             particle_q, particle_qd = self.apply_particle_deltas(
-                                model, state_in, state_out, particle_deltas, dt, shape_matching=False)
+                                model, state_in, state_out, particle_deltas, dt)
 
             if model.particle_count:
                 self.angular_momentum = compute_angular_momentum(
@@ -220,8 +199,26 @@ class SolverSRXPBD(SolverBase):
                     device=model.device
                 )
                 particle_q, particle_qd = self.apply_particle_deltas(
-                    model, state_in, state_out, particle_deltas, dt, shape_matching=True
+                    model, state_in, state_out, particle_deltas, dt
                 )
+                for i in range(3):
+                    wp.launch(
+                        kernel=enforce_momemntum_conservation,
+                        dim=1,
+                        inputs=[
+                            particle_q,
+                            particle_qd,
+
+                            model.particle_count,
+                            model.particle_flags,
+                            model.particle_mass,
+                            self.linear_momentum,
+                            self.angular_momentum,
+                            dt,
+                        ],
+                        outputs=[particle_q, particle_qd],
+                        device=model.device
+                    )
 
             if model.particle_count:
                 if particle_q.ptr != state_out.particle_q.ptr:

@@ -825,43 +825,6 @@ def solve_shape_matching(
         dx = (goal - x)
         wp.atomic_add(delta, i, dx)
 
-    # Enforce conservation of linear momentum
-    # linear_correction = wp.vec3(0.0, 0.0, 0.0)
-    # for i in range(particle_count):
-    #     m = particle_mass[i]
-    #     linear_correction += delta[i] * m
-    # linear_correction = linear_correction / tot_w
-
-    # Enforce conservation of angular momentum
-    # angular_momentum = wp.vec3(0.0, 0.0, 0.0)
-    # inertia_tensor = wp.mat33(0.0)
-    
-    # for i in range(particle_count):
-    #     m = particle_mass[i]
-    #     r = particle_q[i] - t
-    #     v = delta[i] - linear_correction
-        
-    #     # Accumulate angular momentum from the corrected deltas
-    #     angular_momentum += wp.cross(r, m * v)
-        
-    #     # Build inertia tensor about center of mass
-    #     r_outer = wp.outer(r, r)
-    #     r_sq = wp.dot(r, r)
-    #     inertia_tensor += m * (r_sq * wp.mat33(1.0, 0.0, 0.0,
-    #                                              0.0, 1.0, 0.0,
-    #                                              0.0, 0.0, 1.0) - r_outer)
-    # # Compute angular velocity correction needed to cancel angular momentum
-    # # L = I * omega, so omega = I^-1 * L
-    # inertia_inv = wp.inverse(inertia_tensor)
-    # omega = inertia_inv @ angular_momentum
-    
-    # # Apply both linear and angular momentum corrections
-    # for i in range(particle_count):
-    #     r = particle_q[i] - t
-    #     angular_correction = wp.cross(omega, r)
-    #     wp.atomic_sub(delta, i, linear_correction + angular_correction)
-
-
 @wp.kernel
 def apply_particle_deltas(
     x_orig: wp.array(dtype=wp.vec3),
@@ -902,137 +865,60 @@ def apply_particle_deltas(
 
 
 @wp.kernel
-def apply_deltas_particles_for_shape_matching(
+def enforce_momemntum_conservation(
     x_pred: wp.array(dtype=wp.vec3),
     v_pred: wp.array(dtype=wp.vec3),
-    particle_flags: wp.array(dtype=wp.int32),
-    delta: wp.array(dtype=wp.vec3),          # RAW shape-matching dx
-    particle_mass: wp.array(dtype=float),
     particle_count: int,
-    target_P: wp.vec3,                       # total linear momentum BEFORE shape matching
-    target_L: wp.vec3,                       # intrinsic angular momentum about COM BEFORE shape matching
+    particle_flags: wp.array(dtype=wp.int32),
+    particle_mass: wp.array(dtype=float),
+    target_P: wp.vec3,
+    target_L: wp.vec3,
     dt: float,
     x_out: wp.array(dtype=wp.vec3),
     v_out: wp.array(dtype=wp.vec3),
 ):
-
-    tid = wp.tid()
-    if tid != 0:
-        return
-
     I3 = wp.mat33(
         1.0, 0.0, 0.0,
         0.0, 1.0, 0.0,
         0.0, 0.0, 1.0
     )
-
-    # -------------------------------------------------------------------------
-    # 0) Mass + COM of current configuration (about which we remove rigid parts)
-    # -------------------------------------------------------------------------
+    
     M = float(0.0)
-    com = wp.vec3(0.0)
 
     for i in range(particle_count):
         if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
             continue
         m = particle_mass[i]
         M += m
-        com += m * x_pred[i]
-    com = com / M
-
-    # -------------------------------------------------------------------------
-    # 1) Remove rigid translation from delta: d_bar = (Σ m d)/M
-    # -------------------------------------------------------------------------
-    d_bar = wp.vec3(0.0)
-    for i in range(particle_count):
-        if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
-            continue
-        d_bar += particle_mass[i] * delta[i]
-    d_bar = d_bar / M
-
-    # -------------------------------------------------------------------------
-    # 2) Remove rigid rotation component from delta:
-    #    treat delta as a "velocity-like" quantity for angular content extraction.
-    #
-    #    Ld = Σ r × (m * (d - d_bar))
-    #    I  = Σ m * ( (r·r)I - r r^T )
-    #    omega_d = I^{-1} Ld
-    #    delta_corr = (d - d_bar) - (omega_d × r)
-    #
-    # This makes delta_corr have:
-    #   Σ m delta_corr = 0
-    #   Σ r × (m delta_corr) = 0
-    # -------------------------------------------------------------------------
-    I = wp.mat33(0.0)
-    Ld = wp.vec3(0.0)
-
-    for i in range(particle_count):
-        if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
-            continue
-        m = particle_mass[i]
-        r = x_pred[i] - com
-        d1 = delta[i] - d_bar
-        Ld += wp.cross(r, m * d1)
-        r2 = wp.dot(r, r)
-        I += m * (r2 * I3 - wp.outer(r, r))
-    # I += 1e-12 * I3  # conditioning (degenerate sets)
-    omega_d = wp.inverse(I) @ Ld
-
-    # -------------------------------------------------------------------------
-    # 3) Apply corrected delta to positions + Müller velocity update
-    #    x_out = x_pred + delta_corr
-    #    v_tmp = v_pred + delta_corr/dt
-    # -------------------------------------------------------------------------
-    for i in range(particle_count):
-        if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
-            continue
-        r = x_pred[i] - com
-        d_corr = (delta[i] - d_bar) - wp.cross(omega_d, r)
-        x_out[i] = x_pred[i] + d_corr
-        v_out[i] = v_pred[i] + d_corr / dt
-
-    # -------------------------------------------------------------------------
-    # 4) Enforce target linear momentum by adding uniform dv
-    # -------------------------------------------------------------------------
 
     Pprime = wp.vec3(0.0)
     for i in range(particle_count):
         if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
             continue
-        Pprime += particle_mass[i] * v_out[i]
+        Pprime += particle_mass[i] * v_pred[i]
     
     dv = (target_P - Pprime) / M
     for i in range(particle_count):
         if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
             continue
-        v_out[i] = v_out[i] + dv
+        v_out[i] = v_pred[i] + dv
+        x_out[i] = x_pred[i] + dv * dt
 
-    # -------------------------------------------------------------------------
-    # 5) Enforce target intrinsic angular momentum about COM:
-    #    L = Σ r × (m * v_rel), with v_rel = v - v_com
-    #    where v_com = target_P / M (after linear correction)
-    #    then remove omega_err × r from velocities.
-    #
-    #    omega_err = I^{-1} (Lprime - target_L)
-    # -------------------------------------------------------------------------
-    com2 = wp.vec3(0.0)
+    com = wp.vec3(0.0)
     for i in range(particle_count):
         if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
             continue
-        com2 += particle_mass[i] * x_out[i]
-    com2 = com2 / M
+        com += particle_mass[i] * x_out[i]
+    com = com / M
 
-    # inertia about com2 from x_out
     I2 = wp.mat33(0.0)
     for i in range(particle_count):
         if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
             continue
         m = particle_mass[i]
-        r = x_out[i] - com2
+        r = x_out[i] - com
         r2 = wp.dot(r, r)
         I2 += m * (r2 * I3 - wp.outer(r, r))
-    # I2 += 1e-12 * I3
-    # vcom = target_P / M
     
     # Calculate v_com from v_out
     vcom = wp.vec3(0.0)
@@ -1048,7 +934,7 @@ def apply_deltas_particles_for_shape_matching(
         if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
             continue
         m = particle_mass[i]
-        r = x_out[i] - com2
+        r = x_out[i] - com
         vrel = v_out[i] - vcom
         Lprime += wp.cross(r, m * vrel)
 
@@ -1058,5 +944,6 @@ def apply_deltas_particles_for_shape_matching(
     for i in range(particle_count):
         if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
             continue
-        r = x_out[i] - com2
+        r = x_out[i] - com
         v_out[i] = v_out[i] - wp.cross(omega_err, r)
+        x_out[i] = x_out[i] - wp.cross(omega_err, r) * dt
