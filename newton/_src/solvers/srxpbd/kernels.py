@@ -231,6 +231,7 @@ def solve_particle_particle_contacts(
     particle_invmass: wp.array(dtype=float),
     particle_radius: wp.array(dtype=float),
     particle_flags: wp.array(dtype=wp.int32),
+    particle_group: wp.array(dtype=wp.int32),
     k_mu: float,
     k_cohesion: float,
     max_radius: float,
@@ -261,6 +262,15 @@ def solve_particle_particle_contacts(
     delta = wp.vec3(0.0)
 
     while wp.hash_grid_query_next(query, index):
+        # Only collide with particles from different groups (inter-group collisions are 
+        # handled by shape matching)
+        my_group = particle_group[i]
+        other_group = particle_group[index]
+
+        # Skip if same group
+        if my_group >= 0 and my_group == other_group:
+            continue
+
         if (particle_flags[index] & ParticleFlags.ACTIVE) != 0 and index != i:
             # compute distance to point
             n = x - particle_x[index]
@@ -775,20 +785,45 @@ def solve_tetrahedra2(
 
 
 @wp.kernel
-def solve_shape_matching(
+def solve_shape_matching_batch(
     particle_q: wp.array(dtype=wp.vec3),
     particle_q_rest: wp.array(dtype=wp.vec3),
     particle_mass: wp.array(dtype=float),
-    particle_count: int,
+    group_particle_start: wp.array(dtype=wp.int32),
+    group_particle_count: wp.array(dtype=wp.int32),
+    group_particles_flat: wp.array(dtype=wp.int32),
     delta: wp.array(dtype=wp.vec3),
 ):
+    """
+    Solve shape matching constraints for a batch of groups.
+    
+    Args:
+        particle_q: Current particle positions
+        particle_q_rest: Rest particle positions
+        particle_mass: Particle masses 
+        group_particle_start: Start index of each group's particles in the flat array
+        group_particle_count: Number of particles in each group
+        group_particles_flat: Flattened array of all group particle indices
+        delta: Output delta array to accumulate results
+    """
+
+    # Each thread handles one group
+    group_id = wp.tid()
+
+    start_idx = group_particle_start[group_id]
+    num_particles = group_particle_count[group_id]
+    
+    wp.printf("Group %d: num_particles = %d\n", group_id, num_particles)
+
     tot_w = float(0.0)
     t = wp.vec3(0.0)
     t0 = wp.vec3(0.0)
-    for i in range(particle_count):
-        w = particle_mass[i]
-        x = particle_q[i]
-        x0 = particle_q_rest[i]
+
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        w = particle_mass[idx]
+        x = particle_q[idx]
+        x0 = particle_q_rest[idx]
 
         tot_w += w
         t += w * x
@@ -799,10 +834,11 @@ def solve_shape_matching(
 
     # covariance A
     A = wp.mat33(0.0)
-    for i in range(particle_count):
-        w = particle_mass[i]
-        x = particle_q[i]
-        x0 = particle_q_rest[i]
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        w = particle_mass[idx]
+        x = particle_q[idx]
+        x0 = particle_q_rest[idx]
         pi = x - t
         qi = x0 - t0
         A += wp.outer(pi, qi) * w
@@ -817,13 +853,15 @@ def solve_shape_matching(
     if (wp.determinant(R) < 0.0):
         U[:,2] = -U[:,2]
         R = U @ wp.transpose(V)
-    
-    for i in range(particle_count):
-        x0 = particle_q_rest[i]
-        x = particle_q[i]
+
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        x0 = particle_q_rest[idx]
+        x = particle_q[idx]
         goal = R @ (x0 - t0) + t
         dx = (goal - x)
-        wp.atomic_add(delta, i, dx)
+        wp.atomic_add(delta, idx, dx)
+
 
 @wp.kernel
 def apply_particle_deltas(
@@ -831,6 +869,7 @@ def apply_particle_deltas(
     x_pred: wp.array(dtype=wp.vec3),
     v_pred: wp.array(dtype=wp.vec3),
     particle_flags: wp.array(dtype=wp.int32),
+    particle_mass: wp.array(dtype=float),
     delta: wp.array(dtype=wp.vec3),
     dt: float,
     v_max: float,
@@ -838,6 +877,14 @@ def apply_particle_deltas(
     v_out: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
+
+    # Static particles (mass=0) don't move - just preserve current state
+    if particle_mass[tid] == 0.0:
+        x_out[tid] = x_pred[tid]
+        v_out[tid] = wp.vec3(0.0, 0.0, 0.0)
+        return
+
+    # Inactive particles do not move
     if (particle_flags[tid] & ParticleFlags.ACTIVE) == 0:
         return
 
@@ -867,83 +914,96 @@ def apply_particle_deltas(
 @wp.kernel
 def enforce_momemntum_conservation(
     x_pred: wp.array(dtype=wp.vec3),
-    v_pred: wp.array(dtype=wp.vec3),
-    particle_count: int,
+    v_pred: wp.array(dtype=wp.vec3),    
     particle_flags: wp.array(dtype=wp.int32),
     particle_mass: wp.array(dtype=float),
     target_P: wp.vec3,
     target_L: wp.vec3,
     dt: float,
+    group_particle_start: wp.array(dtype=wp.int32),
+    group_particle_count: wp.array(dtype=wp.int32),
+    group_particles_flat: wp.array(dtype=wp.int32),
     x_out: wp.array(dtype=wp.vec3),
     v_out: wp.array(dtype=wp.vec3),
 ):
-    I3 = wp.mat33(
+    
+    group_id = wp.tid()
+    start_idx = group_particle_start[group_id]
+    num_particles = group_particle_count[group_id]
+    
+    M = float(0.0)
+
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]    
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
+            continue
+        m = particle_mass[idx]
+        M += m
+
+    Pprime = wp.vec3(0.0)
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
+            continue
+        Pprime += particle_mass[idx] * v_pred[idx]
+    
+    dv = (target_P - Pprime) / M
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
+            continue
+        v_out[idx] = v_pred[idx] + dv
+        x_out[idx] = x_pred[idx] + dv * dt
+
+    com = wp.vec3(0.0)
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
+            continue
+        com += particle_mass[idx] * x_out[idx]
+    com = com / M
+
+    identity = wp.mat33(
         1.0, 0.0, 0.0,
         0.0, 1.0, 0.0,
         0.0, 0.0, 1.0
     )
-    
-    M = float(0.0)
-
-    for i in range(particle_count):
-        if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
+    I = wp.mat33(0.0) # Inertia tensor
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
             continue
-        m = particle_mass[i]
-        M += m
-
-    Pprime = wp.vec3(0.0)
-    for i in range(particle_count):
-        if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
-            continue
-        Pprime += particle_mass[i] * v_pred[i]
-    
-    dv = (target_P - Pprime) / M
-    for i in range(particle_count):
-        if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
-            continue
-        v_out[i] = v_pred[i] + dv
-        x_out[i] = x_pred[i] + dv * dt
-
-    com = wp.vec3(0.0)
-    for i in range(particle_count):
-        if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
-            continue
-        com += particle_mass[i] * x_out[i]
-    com = com / M
-
-    I2 = wp.mat33(0.0)
-    for i in range(particle_count):
-        if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
-            continue
-        m = particle_mass[i]
-        r = x_out[i] - com
+        m = particle_mass[idx]
+        r = x_out[idx] - com
         r2 = wp.dot(r, r)
-        I2 += m * (r2 * I3 - wp.outer(r, r))
-    
-    # Calculate v_com from v_out
+        I += m * (r2 * identity - wp.outer(r, r))
+
     vcom = wp.vec3(0.0)
-    for i in range(particle_count):
-        if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
             continue
-        m = particle_mass[i]
-        vcom += m * v_out[i]
+        m = particle_mass[idx]
+        vcom += m * v_out[idx]
     vcom = vcom / M
 
     Lprime = wp.vec3(0.0)
-    for i in range(particle_count):
-        if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
             continue
-        m = particle_mass[i]
-        r = x_out[i] - com
-        vrel = v_out[i] - vcom
+        m = particle_mass[idx]
+        r = x_out[idx] - com
+        vrel = v_out[idx] - vcom
         Lprime += wp.cross(r, m * vrel)
 
     dL = Lprime - target_L
-    omega_err = wp.inverse(I2) @ dL
+    omega_err = wp.inverse(I) @ dL
 
-    for i in range(particle_count):
-        if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
             continue
-        r = x_out[i] - com
-        v_out[i] = v_out[i] - wp.cross(omega_err, r)
-        x_out[i] = x_out[i] - wp.cross(omega_err, r) * dt
+        r = x_out[idx] - com
+        v_out[idx] = v_out[idx] - wp.cross(omega_err, r)
+        x_out[idx] = x_out[idx] - wp.cross(omega_err, r) * dt
