@@ -905,6 +905,11 @@ def apply_particle_deltas(
     v_new = vp + d/dt
     x_new = xp + d
 
+    # enforce velocity limit to prevent instability
+    v_new_mag = wp.length(v_new)
+    if v_new_mag > v_max:
+        v_new *= v_max / v_new_mag
+
     x_out[tid] = x_new
     v_out[tid] = v_new
 
