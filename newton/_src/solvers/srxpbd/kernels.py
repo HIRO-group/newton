@@ -929,6 +929,20 @@ def enforce_momemntum_conservation(
     x_out: wp.array(dtype=wp.vec3),
     v_out: wp.array(dtype=wp.vec3),
 ):
+    '''
+    This kernel enforces momentum conservation after the shape matching algorithm is called. 
+    x_pred and v_pred are the predicted positions and velocities after shape matching.
+    x_out and v_out are the output positions and velocities after momentum correction.
+    target_P and target_L are the linear and angular momentum before shape matching is called.
+    By enforcing the momentum to match the target values, we ensure that the shape matching does not introduce any artificial momentum changes.
+    Args:
+        x_pred: Predicted particle positions
+        v_pred: Predicted particle velocities
+        target_P: Target linear momentum for each group
+        target_L: Target angular momentum for each group
+        x_out: Output particle positions after momentum correction
+        v_out: Output particle velocities after momentum correction
+    '''
     
     group_id = wp.tid()
     start_idx = group_particle_start[group_id]
@@ -937,32 +951,24 @@ def enforce_momemntum_conservation(
     M = float(0.0)
 
     for p in range(num_particles):
-        idx = group_particles_flat[start_idx + p]    
-        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
-            continue
+        idx = group_particles_flat[start_idx + p]
         m = particle_mass[idx]
         M += m
 
     Pprime = wp.vec3(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
-        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
-            continue
         Pprime += particle_mass[idx] * v_pred[idx]
     
     dv = (target_P[group_id] - Pprime) / M
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
-        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
-            continue
         v_out[idx] = v_pred[idx] + dv
         x_out[idx] = x_pred[idx] + dv * dt
 
     com = wp.vec3(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
-        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
-            continue
         com += particle_mass[idx] * x_out[idx]
     com = com / M
 
@@ -974,8 +980,6 @@ def enforce_momemntum_conservation(
     I = wp.mat33(0.0) # Inertia tensor
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
-        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
-            continue
         m = particle_mass[idx]
         r = x_out[idx] - com
         r2 = wp.dot(r, r)
@@ -984,8 +988,6 @@ def enforce_momemntum_conservation(
     vcom = wp.vec3(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
-        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
-            continue
         m = particle_mass[idx]
         vcom += m * v_out[idx]
     vcom = vcom / M
@@ -993,8 +995,6 @@ def enforce_momemntum_conservation(
     Lprime = wp.vec3(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
-        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
-            continue
         m = particle_mass[idx]
         r = x_out[idx] - com
         vrel = v_out[idx] - vcom
@@ -1005,8 +1005,6 @@ def enforce_momemntum_conservation(
 
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
-        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
-            continue
         r = x_out[idx] - com
         v_out[idx] = v_out[idx] - wp.cross(omega_err, r)
         x_out[idx] = x_out[idx] - wp.cross(omega_err, r) * dt
@@ -1023,17 +1021,14 @@ def compute_momentum(
     group_particles_flat: wp.array(dtype=wp.int32),
     out_P: wp.array(dtype=wp.vec3),
     out_L: wp.array(dtype=wp.vec3),
-):
-    
+):  
     group_id = wp.tid()
     start_idx = group_particle_start[group_id]
     num_particles = group_particle_count[group_id]
     
     M = float(0.0)
     for p in range(num_particles):
-        idx = group_particles_flat[start_idx + p]    
-        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
-            continue
+        idx = group_particles_flat[start_idx + p]
         m = particle_mass[idx]
         M += m
 
@@ -1041,15 +1036,11 @@ def compute_momentum(
     P = wp.vec3(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
-        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
-            continue
         P += particle_mass[idx] * particle_qd[idx]
     
     com = wp.vec3(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
-        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
-            continue
         com += particle_mass[idx] * particle_q[idx]
     com = com / M
     vcom = P / M
@@ -1058,8 +1049,6 @@ def compute_momentum(
     L = wp.vec3(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
-        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
-            continue
         m = particle_mass[idx]
         r = particle_q[idx] - com
         vrel = particle_qd[idx] - vcom
