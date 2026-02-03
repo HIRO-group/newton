@@ -792,7 +792,6 @@ def solve_shape_matching_batch(
     group_particle_start: wp.array(dtype=wp.int32),
     group_particle_count: wp.array(dtype=wp.int32),
     group_particles_flat: wp.array(dtype=wp.int32),
-    local_delta: wp.array(dtype=wp.vec3),
     delta: wp.array(dtype=wp.vec3),
 ):
     """
@@ -805,7 +804,6 @@ def solve_shape_matching_batch(
         group_particle_start: Start index of each group's particles in the flat array
         group_particle_count: Number of particles in each group
         group_particles_flat: Flattened array of all group particle indices
-        local_delta: Local delta array to store intermediate results
         delta: Output delta array to accumulate results
     """
 
@@ -819,9 +817,8 @@ def solve_shape_matching_batch(
     t = wp.vec3(0.0)
     t0 = wp.vec3(0.0)
 
-    for i in range(num_particles):
-        # Get particle index
-        idx = group_particles_flat[start_idx + i]
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
         w = particle_mass[idx]
         x = particle_q[idx]
         x0 = particle_q_rest[idx]
@@ -835,8 +832,8 @@ def solve_shape_matching_batch(
 
     # covariance A
     A = wp.mat33(0.0)
-    for i in range(num_particles):
-        idx = group_particles_flat[start_idx + i]
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
         w = particle_mass[idx]
         x = particle_q[idx]
         x0 = particle_q_rest[idx]
@@ -855,53 +852,13 @@ def solve_shape_matching_batch(
         U[:,2] = -U[:,2]
         R = U @ wp.transpose(V)
 
-    for i in range(num_particles):
-        idx = group_particles_flat[start_idx + i]
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
         x0 = particle_q_rest[idx]
         x = particle_q[idx]
         goal = R @ (x0 - t0) + t
         dx = (goal - x)
-        local_delta[idx] = dx
-
-    # Enforce conservation of linear momentum
-    linear_correction = wp.vec3(0.0, 0.0, 0.0)
-    for i in range(num_particles):
-        idx = group_particles_flat[start_idx + i]
-        m = particle_mass[idx]
-        linear_correction += local_delta[idx] * m
-    linear_correction = linear_correction / tot_w
-
-    # Enforce conservation of angular momentum
-    angular_momentum = wp.vec3(0.0, 0.0, 0.0)
-    inertia_tensor = wp.mat33(0.0)
-    
-    for i in range(num_particles):
-        idx = group_particles_flat[start_idx + i]
-        m = particle_mass[idx]
-        r = particle_q[idx] - t
-        v = local_delta[idx] - linear_correction
-        
-        # Accumulate angular momentum from the corrected deltas
-        angular_momentum += wp.cross(r, m * v)
-        
-        # Build inertia tensor about center of mass
-        r_outer = wp.outer(r, r)
-        r_sq = wp.dot(r, r)
-        inertia_tensor += m * (r_sq * wp.mat33(1.0, 0.0, 0.0,
-                                                 0.0, 1.0, 0.0,
-                                                 0.0, 0.0, 1.0) - r_outer)
-    
-    # Compute angular velocity correction needed to cancel angular momentum
-    # L = I * omega, so omega = I^-1 * L
-    inertia_inv = wp.inverse(inertia_tensor)
-    omega = inertia_inv @ angular_momentum
-    
-    # Apply both linear and angular momentum corrections
-    for i in range(num_particles):
-        idx = group_particles_flat[start_idx + i]
-        r = particle_q[idx] - t
-        angular_correction = wp.cross(omega, r)
-        wp.atomic_add(delta, idx, local_delta[idx] - linear_correction - angular_correction)
+        wp.atomic_add(delta, idx, dx)
 
 
 @wp.kernel
@@ -943,8 +900,6 @@ def apply_particle_deltas(
     But this leads to inaccurate results for long horizon simulation (such as t=10s). 
     Assume d = 0, then x_new = xp, and v_new = (xp_x0)/dt which must be = vp 
     But due to numerical errors it is not exactly equal to vp, leading to cumulative errors over time.
-    Below update is from shape matching paper which is more accurate:
-    https://graphics.stanford.edu/courses/cs468-05-fall/Papers/p471-muller.pdf
     For example, if d = 0, then v_new = vp exactly. and x_new = xp exactly.
     '''
     v_new = vp + d/dt
@@ -957,3 +912,147 @@ def apply_particle_deltas(
 
     x_out[tid] = x_new
     v_out[tid] = v_new
+
+
+@wp.kernel
+def enforce_momemntum_conservation(
+    x_pred: wp.array(dtype=wp.vec3),
+    v_pred: wp.array(dtype=wp.vec3),    
+    particle_flags: wp.array(dtype=wp.int32),
+    particle_mass: wp.array(dtype=float),
+    target_P: wp.array(dtype=wp.vec3),
+    target_L: wp.array(dtype=wp.vec3),
+    dt: float,
+    group_particle_start: wp.array(dtype=wp.int32),
+    group_particle_count: wp.array(dtype=wp.int32),
+    group_particles_flat: wp.array(dtype=wp.int32),
+    x_out: wp.array(dtype=wp.vec3),
+    v_out: wp.array(dtype=wp.vec3),
+):
+    '''
+    This kernel enforces momentum conservation after the shape matching algorithm is called. 
+    x_pred and v_pred are the predicted positions and velocities after shape matching.
+    x_out and v_out are the output positions and velocities after momentum correction.
+    target_P and target_L are the linear and angular momentum before shape matching is called.
+    By enforcing the momentum to match the target values, we ensure that the shape matching does not introduce any artificial momentum changes.
+    Args:
+        x_pred: Predicted particle positions
+        v_pred: Predicted particle velocities
+        target_P: Target linear momentum for each group
+        target_L: Target angular momentum for each group
+        x_out: Output particle positions after momentum correction
+        v_out: Output particle velocities after momentum correction
+    '''
+    
+    group_id = wp.tid()
+    start_idx = group_particle_start[group_id]
+    num_particles = group_particle_count[group_id]
+    
+    M = float(0.0)
+
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        m = particle_mass[idx]
+        M += m
+
+    Pprime = wp.vec3(0.0)
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        Pprime += particle_mass[idx] * v_pred[idx]
+    
+    dv = (target_P[group_id] - Pprime) / M
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        v_out[idx] = v_pred[idx] + dv
+        x_out[idx] = x_pred[idx] + dv * dt
+
+    com = wp.vec3(0.0)
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        com += particle_mass[idx] * x_out[idx]
+    com = com / M
+
+    identity = wp.mat33(
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0
+    )
+    I = wp.mat33(0.0) # Inertia tensor
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        m = particle_mass[idx]
+        r = x_out[idx] - com
+        r2 = wp.dot(r, r)
+        I += m * (r2 * identity - wp.outer(r, r))
+
+    vcom = wp.vec3(0.0)
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        m = particle_mass[idx]
+        vcom += m * v_out[idx]
+    vcom = vcom / M
+
+    Lprime = wp.vec3(0.0)
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        m = particle_mass[idx]
+        r = x_out[idx] - com
+        vrel = v_out[idx] - vcom
+        Lprime += wp.cross(r, m * vrel)
+
+    dL = Lprime - target_L[group_id]
+    omega_err = wp.inverse(I) @ dL
+
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        r = x_out[idx] - com
+        v_out[idx] = v_out[idx] - wp.cross(omega_err, r)
+        x_out[idx] = x_out[idx] - wp.cross(omega_err, r) * dt
+
+
+@wp.kernel
+def compute_momentum(
+    particle_q: wp.array(dtype=wp.vec3),
+    particle_qd: wp.array(dtype=wp.vec3),    
+    particle_flags: wp.array(dtype=wp.int32),
+    particle_mass: wp.array(dtype=float),
+    group_particle_start: wp.array(dtype=wp.int32),
+    group_particle_count: wp.array(dtype=wp.int32),
+    group_particles_flat: wp.array(dtype=wp.int32),
+    out_P: wp.array(dtype=wp.vec3),
+    out_L: wp.array(dtype=wp.vec3),
+):  
+    group_id = wp.tid()
+    start_idx = group_particle_start[group_id]
+    num_particles = group_particle_count[group_id]
+    
+    M = float(0.0)
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        m = particle_mass[idx]
+        M += m
+
+    # Linear momentum
+    P = wp.vec3(0.0)
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        P += particle_mass[idx] * particle_qd[idx]
+    
+    com = wp.vec3(0.0)
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        com += particle_mass[idx] * particle_q[idx]
+    com = com / M
+    vcom = P / M
+    
+    # Angular momentum
+    L = wp.vec3(0.0)
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        m = particle_mass[idx]
+        r = particle_q[idx] - com
+        vrel = particle_qd[idx] - vcom
+        L += wp.cross(r, m * vrel)
+
+    out_P[group_id] = P
+    out_L[group_id] = L

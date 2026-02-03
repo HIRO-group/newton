@@ -9,9 +9,10 @@ from .kernels import (
     apply_particle_deltas,
     solve_particle_particle_contacts,
     solve_particle_shape_contacts,
+    enforce_momemntum_conservation,
     solve_shape_matching_batch,
+    compute_momentum,
 )
-
 
 class SolverSRXPBD(SolverBase):
     """
@@ -41,7 +42,7 @@ class SolverSRXPBD(SolverBase):
 
         # helper variables to track constraint resolution vars
         self._particle_delta_counter = 0
-        self.particle_q_rest = model.particle_q
+        self.particle_q_rest = wp.clone(model.particle_q)
 
         # Precompute which particle groups have mass
         if model.particle_count and model.particle_group_count > 0:
@@ -49,7 +50,8 @@ class SolverSRXPBD(SolverBase):
                 self._group_has_mass_cache = []
                 for group_id in range(model.particle_group_count):
                     group_particle_indices = model.particle_groups[group_id]
-                    group_masses = model.particle_mass.numpy()[group_particle_indices.numpy()]
+                    group_masses = model.particle_mass.numpy(
+                    )[group_particle_indices.numpy()]
                     has_mass = bool(np.any(group_masses > 0.0))
                     self._group_has_mass_cache.append(has_mass)
 
@@ -58,31 +60,37 @@ class SolverSRXPBD(SolverBase):
         self._group_particle_start = []
         self._group_particle_count = []
         self._group_particles_flat = []
-        
+
         if model.particle_count > 0 and model.particle_group_count > 0:
             particle_offset = 0
-            
+
             for group_id in range(model.particle_group_count):
                 group_particle_indices = model.particle_groups[group_id]
-                group_masses = model.particle_mass.numpy()[group_particle_indices.numpy()]
+                group_masses = model.particle_mass.numpy(
+                )[group_particle_indices.numpy()]
                 has_mass = bool(np.any(group_masses > 0.0))
-                
+
                 if has_mass:  # Only store dynamic groups
                     num_particles = len(group_particle_indices.numpy())
-                    
+
                     self._dynamic_group_ids.append(group_id)
                     self._group_particle_start.append(particle_offset)
                     self._group_particle_count.append(num_particles)
-                    self._group_particles_flat.extend(group_particle_indices.numpy().tolist())
-                    
+                    self._group_particles_flat.extend(
+                        group_particle_indices.numpy().tolist())
+
                     particle_offset += num_particles
-            
+
             # Convert to Warp arrays
-            self._dynamic_group_ids = wp.array(self._dynamic_group_ids, dtype=wp.int32, device=model.device)
-            self._group_particle_start = wp.array(self._group_particle_start, dtype=wp.int32, device=model.device)
-            self._group_particle_count = wp.array(self._group_particle_count, dtype=wp.int32, device=model.device)
-            self._group_particles_flat = wp.array(self._group_particles_flat, dtype=wp.int32, device=model.device)
-            
+            self._dynamic_group_ids = wp.array(
+                self._dynamic_group_ids, dtype=wp.int32, device=model.device)
+            self._group_particle_start = wp.array(
+                self._group_particle_start, dtype=wp.int32, device=model.device)
+            self._group_particle_count = wp.array(
+                self._group_particle_count, dtype=wp.int32, device=model.device)
+            self._group_particles_flat = wp.array(
+                self._group_particles_flat, dtype=wp.int32, device=model.device)
+
             self._num_dynamic_groups = len(self._dynamic_group_ids.numpy())
         else:
             self._num_dynamic_groups = 0
@@ -121,7 +129,7 @@ class SolverSRXPBD(SolverBase):
             inputs=[
                 self.particle_q_init,
                 particle_q,
-                particle_qd, 
+                particle_qd,
                 model.particle_flags,
                 model.particle_mass,
                 particle_deltas,
@@ -142,9 +150,7 @@ class SolverSRXPBD(SolverBase):
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
         requires_grad = state_in.requires_grad
         self._particle_delta_counter = 0
-
         model = self.model
-
         particle_q = None
         particle_qd = None
         particle_deltas = None
@@ -161,7 +167,6 @@ class SolverSRXPBD(SolverBase):
                 self.particle_qd_init = wp.clone(state_in.particle_qd)
                 particle_deltas = wp.empty_like(state_out.particle_qd)
                 self.integrate_particles(model, state_in, state_out, dt)
-
 
             if model.body_count:
                 body_q = state_out.body_q
@@ -211,7 +216,6 @@ class SolverSRXPBD(SolverBase):
                                     dt,
                                     self.soft_contact_relaxation,
                                 ],
-                                # outputs
                                 outputs=[particle_deltas, body_deltas],
                                 device=model.device,
                             )
@@ -220,7 +224,8 @@ class SolverSRXPBD(SolverBase):
                         # Need at least 2 groups to collide
                         if model.particle_group_count > 1:
                             # Build hash grid for spatial queries
-                            model.particle_grid.build(particle_q, model.particle_max_radius)
+                            model.particle_grid.build(
+                                particle_q, model.particle_max_radius)
 
                             wp.launch(
                                 kernel=solve_particle_particle_contacts,
@@ -242,32 +247,66 @@ class SolverSRXPBD(SolverBase):
                                 outputs=[particle_deltas],
                                 device=model.device,
                             )
-
-                        # Solve shape matching for ALL dynamic groups in one kernel launch
-                        if self._num_dynamic_groups > 0:
-                            local_delta = wp.zeros_like(particle_deltas)
-
-                            wp.launch(
-                                kernel=solve_shape_matching_batch,
-                                # One thread per dynamic group
-                                dim=self._num_dynamic_groups,
-                                inputs=[
-                                    particle_q, 
-                                    self.particle_q_rest,
-                                    model.particle_mass,
-                                    self._group_particle_start,
-                                    self._group_particle_count,
-                                    self._group_particles_flat,
-                                    local_delta,
-                                ],
-                                outputs=[particle_deltas],
-                                device=model.device
-                            )
-
                         # Apply all accumulated deltas at once
                         particle_q, particle_qd = self.apply_particle_deltas(
                             model, state_in, state_out, particle_deltas, dt
                         )
+
+            if self._num_dynamic_groups > 0:
+                linear_momentum_b4_SM = wp.zeros(self._num_dynamic_groups, dtype=wp.vec3, device=model.device)
+                angular_momentum_b4_SM = wp.zeros(self._num_dynamic_groups, dtype=wp.vec3, device=model.device)
+                wp.launch(
+                    kernel=compute_momentum,
+                    dim=self._num_dynamic_groups,
+                    inputs=[
+                        particle_q,
+                        particle_qd,
+                        model.particle_flags,
+                        model.particle_mass,
+                        self._group_particle_start,
+                        self._group_particle_count,
+                        self._group_particles_flat,
+                    ],
+                    outputs=[linear_momentum_b4_SM, angular_momentum_b4_SM],
+                    device=model.device
+                )
+                particle_deltas.zero_()
+                wp.launch( # Shape matching can be called only once
+                    kernel=solve_shape_matching_batch,
+                    dim=self._num_dynamic_groups,
+                    inputs=[
+                        particle_q,
+                        self.particle_q_rest,
+                        model.particle_mass,
+                        self._group_particle_start,
+                        self._group_particle_count,
+                        self._group_particles_flat,
+                    ],
+                    outputs=[particle_deltas],
+                    device=model.device
+                )
+                particle_q, particle_qd = self.apply_particle_deltas(
+                    model, state_in, state_out, particle_deltas, dt
+                )
+                for _ in range(3): # TODO
+                    wp.launch(
+                        kernel=enforce_momemntum_conservation,
+                        dim=self._num_dynamic_groups,
+                        inputs=[
+                            particle_q,
+                            particle_qd,
+                            model.particle_flags,
+                            model.particle_mass,
+                            linear_momentum_b4_SM,
+                            angular_momentum_b4_SM,
+                            dt,
+                            self._group_particle_start,
+                            self._group_particle_count,
+                            self._group_particles_flat,
+                        ],
+                        outputs=[particle_q, particle_qd],
+                        device=model.device
+                    )
 
             if model.particle_count:
                 if particle_q.ptr != state_out.particle_q.ptr:
