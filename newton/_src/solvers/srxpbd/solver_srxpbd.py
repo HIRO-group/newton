@@ -278,6 +278,7 @@ class SolverSRXPBD(SolverBase):
                         particle_q,
                         self.particle_q_rest,
                         model.particle_mass,
+                        model.particle_flags,
                         self._group_particle_start,
                         self._group_particle_count,
                         self._group_particles_flat,
