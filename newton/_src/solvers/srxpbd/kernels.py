@@ -814,7 +814,6 @@ def solve_shape_matching_batch(
     start_idx = group_particle_start[group_id]
     num_particles = group_particle_count[group_id]
 
-    # Only consider active particles. If none are active, exit early.
     tot_w = float(0.0)
     t = wp.vec3(0.0)
     t0 = wp.vec3(0.0)
@@ -823,7 +822,6 @@ def solve_shape_matching_batch(
         idx = group_particles_flat[start_idx + p]
         if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
             continue
-        # any_active = True
         w = particle_mass[idx]
         x = particle_q[idx]
         x0 = particle_q_rest[idx]
@@ -838,7 +836,7 @@ def solve_shape_matching_batch(
     t = t / tot_w
     t0 = t0 / tot_w
 
-    # covariance A (active particles only)
+    # covariance A
     A = wp.mat33(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
@@ -960,8 +958,6 @@ def enforce_momemntum_conservation(
     start_idx = group_particle_start[group_id]
     num_particles = group_particle_count[group_id]
 
-    # Only consider active particles. If the group has no active particles,
-    # skip the whole computation (cheap early-out).
     M = float(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
@@ -969,11 +965,10 @@ def enforce_momemntum_conservation(
             continue
         M += particle_mass[idx]
 
-    # nothing to do for empty or zero-mass groups
     if M == 0.0:
         return
 
-    # Compute current linear momentum (only active particles)
+    # Compute current linear momentum
     Pprime = wp.vec3(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
@@ -981,7 +976,7 @@ def enforce_momemntum_conservation(
             continue
         Pprime += particle_mass[idx] * v_pred[idx]
 
-    # distribute linear momentum correction to active particles only
+    # distribute linear momentum correction
     dv = (target_P[group_id] - Pprime) / M
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
@@ -990,7 +985,7 @@ def enforce_momemntum_conservation(
         v_out[idx] = v_pred[idx] + dv
         x_out[idx] = x_pred[idx] + dv * dt
 
-    # compute center of mass using corrected positions (active particles only)
+    # compute center of mass using corrected positions
     com = wp.vec3(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
@@ -1014,7 +1009,7 @@ def enforce_momemntum_conservation(
         r2 = wp.dot(r, r)
         I += m * (r2 * identity - wp.outer(r, r))
 
-    # compute center-of-mass velocity using active particles
+    # compute center-of-mass velocity
     vcom = wp.vec3(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
@@ -1024,7 +1019,7 @@ def enforce_momemntum_conservation(
         vcom += m * v_out[idx]
     vcom = vcom / M
 
-    # compute angular momentum from active particles
+    # compute angular momentum
     Lprime = wp.vec3(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
@@ -1062,30 +1057,44 @@ def compute_momentum(
     group_id = wp.tid()
     start_idx = group_particle_start[group_id]
     num_particles = group_particle_count[group_id]
-    
+
     M = float(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
-        m = particle_mass[idx]
-        M += m
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
+            continue
+        M += particle_mass[idx]
+
+    if M == 0.0:
+        out_P[group_id] = wp.vec3(0.0)
+        out_L[group_id] = wp.vec3(0.0)
+        return
 
     # Linear momentum
     P = wp.vec3(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
+            continue
         P += particle_mass[idx] * particle_qd[idx]
-    
+
+    # center of mass
     com = wp.vec3(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
+            continue
         com += particle_mass[idx] * particle_q[idx]
     com = com / M
+
     vcom = P / M
-    
+
     # Angular momentum
     L = wp.vec3(0.0)
     for p in range(num_particles):
         idx = group_particles_flat[start_idx + p]
+        if (particle_flags[idx] & ParticleFlags.ACTIVE) == 0:
+            continue
         m = particle_mass[idx]
         r = particle_q[idx] - com
         vrel = particle_qd[idx] - vcom
