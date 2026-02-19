@@ -21,8 +21,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.geometry.utils import create_box_mesh
-from newton.geometry import SDFHydroelasticConfig
+from newton.geometry import HydroelasticSDF
 from newton.tests.unittest_utils import (
     add_function_test,
     get_selected_cuda_test_devices,
@@ -62,7 +61,6 @@ solvers = {
         njmax=500,
         nconmax=200,
         solver="newton",
-        ls_parallel=True,
         ls_iterations=100,
     ),
     "xpbd": lambda model: newton.solvers.SolverXPBD(model, iterations=10),
@@ -75,7 +73,7 @@ solvers = {
 def simulate(solver, model, state_0, state_1, control, contacts, collision_pipeline, sim_dt, substeps):
     for _ in range(substeps):
         state_0.clear_forces()
-        contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
+        collision_pipeline.collide(state_0, contacts)
         solver.step(state_0, state_1, control, contacts, sim_dt / substeps)
         state_0, state_1 = state_1, state_0
     return state_0, state_1
@@ -87,20 +85,44 @@ def build_stacked_cubes_scene(
     """Build the stacked cubes scene and return all components for simulation."""
     cube_mesh = None
     if shape_type == ShapeType.MESH:
-        vertices, indices = create_box_mesh((cube_half, cube_half, cube_half))
-        cube_mesh = newton.Mesh(vertices, indices)
+        cube_mesh = newton.Mesh.create_box(
+            cube_half,
+            cube_half,
+            cube_half,
+            duplicate_vertices=False,
+            compute_normals=False,
+            compute_uvs=False,
+            compute_inertia=False,
+        )
 
     # Scale SDF parameters proportionally to cube size
     narrow_band = cube_half * 0.2
     contact_margin = cube_half * 0.2
 
+    if cube_mesh is not None:
+        cube_mesh.build_sdf(
+            max_resolution=32,
+            narrow_band_range=(-narrow_band, narrow_band),
+            margin=contact_margin,
+        )
+
     builder = newton.ModelBuilder()
-    builder.default_shape_cfg = newton.ModelBuilder.ShapeConfig(
-        sdf_max_resolution=32,
-        is_hydroelastic=True,
-        sdf_narrow_band_range=(-narrow_band, narrow_band),
-        contact_margin=contact_margin,
-    )
+    if shape_type == ShapeType.PRIMITIVE:
+        builder.default_shape_cfg = newton.ModelBuilder.ShapeConfig(
+            thickness=1e-5,
+            mu=0.5,
+            sdf_max_resolution=32,
+            is_hydroelastic=True,
+            sdf_narrow_band_range=(-narrow_band, narrow_band),
+            contact_margin=contact_margin,
+        )
+    else:
+        builder.default_shape_cfg = newton.ModelBuilder.ShapeConfig(
+            thickness=1e-5,
+            mu=0.5,
+            is_hydroelastic=True,
+            contact_margin=contact_margin,
+        )
 
     builder.add_ground_plane()
 
@@ -110,7 +132,7 @@ def build_stacked_cubes_scene(
         initial_positions.append(wp.vec3(0.0, 0.0, z_pos))
         body = builder.add_body(
             xform=wp.transform(initial_positions[-1], wp.quat_identity()),
-            key=f"{shape_type.value}_cube_{i}",
+            label=f"{shape_type.value}_cube_{i}",
         )
 
         if shape_type == ShapeType.PRIMITIVE:
@@ -127,14 +149,17 @@ def build_stacked_cubes_scene(
 
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
 
-    sdf_hydroelastic_config = SDFHydroelasticConfig(output_contact_surface=True, reduce_contacts=reduce_contacts)
+    sdf_hydroelastic_config = HydroelasticSDF.Config(
+        output_contact_surface=True, reduce_contacts=reduce_contacts, anchor_contact=True
+    )
 
-    rigid_contact_max_per_pair = 5000 if not reduce_contacts else 100
+    # Hydroelastic without contact reduction can generate many contacts
+    rigid_contact_max = 6000 if not reduce_contacts else 100
 
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(
+    collision_pipeline = newton.CollisionPipeline(
         model,
-        rigid_contact_max_per_pair=rigid_contact_max_per_pair,
-        broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
+        rigid_contact_max=rigid_contact_max,
+        broad_phase="explicit",
         sdf_hydroelastic_config=sdf_hydroelastic_config,
     )
 
@@ -152,16 +177,20 @@ def run_stacked_cubes_hydroelastic_test(
         build_stacked_cubes_scene(device, solver_fn, shape_type, cube_half, reduce_contacts)
     )
 
-    contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
+    contacts = collision_pipeline.contacts()
+    collision_pipeline.collide(state_0, contacts)
 
     sdf_sdf_count = collision_pipeline.narrow_phase.shape_pairs_sdf_sdf_count.numpy()[0]
     test.assertEqual(sdf_sdf_count, NUM_CUBES - 1, f"Expected {NUM_CUBES - 1} sdf_sdf collisions, got {sdf_sdf_count}")
 
     num_frames = int(SIM_TIME / SIM_DT)
 
+    # Scale substeps for small objects - they need smaller time steps for stability
+    substeps = SIM_SUBSTEPS if cube_half >= CUBE_HALF_LARGE else 20
+
     for _ in range(num_frames):
         state_0, state_1 = simulate(
-            solver, model, state_0, state_1, control, contacts, collision_pipeline, SIM_DT, SIM_SUBSTEPS
+            solver, model, state_0, state_1, control, contacts, collision_pipeline, SIM_DT, substeps
         )
 
     body_q = state_0.body_q.numpy()
@@ -215,7 +244,7 @@ def test_stacked_primitive_cubes_hydroelastic_no_reduction(test, device, solver_
 def test_mujoco_hydroelastic_penetration_depth(test, device):
     """Test that hydroelastic penetration depth matches expectation.
 
-    Creates 4 box pairs with different k_hydro and area combinations:
+    Creates 4 box pairs with different kh and area combinations:
     - Case 0: k=1e8, area=0.01 (small stiffness, small area)
     - Case 1: k=1e9, area=0.01 (large stiffness, small area)
     - Case 2: k=1e8, area=0.0225 (small stiffness, large area)
@@ -229,7 +258,7 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
     gravity = 10.0
     external_force = 20.0
 
-    # 4 test cases: (k_hydro, upper_box_size)
+    # 4 test cases: (kh, upper_box_size)
     test_cases = [
         (1e8, 0.1),
         (1e9, 0.1),
@@ -249,26 +278,27 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
     upper_shape_indices = []
     initial_upper_positions = []
     areas = []
-    k_hydros = []
+    kh_values = []
 
     spacing = 0.5
 
-    for i, (k_hydro, upper_size) in enumerate(test_cases):
+    for i, (kh_val, upper_size) in enumerate(test_cases):
         upper_half = upper_size / 2.0
         area = upper_size * upper_size
         areas.append(area)
-        k_hydros.append(0.5 * k_hydro)  # effective stiffness for two equal k shapes
+        kh_values.append(0.5 * kh_val)  # effective stiffness for two equal k shapes
 
         # Inertia for this upper box
         inertia_upper = (1.0 / 6.0) * mass_upper * upper_size * upper_size
         I_m_upper = wp.mat33(inertia_upper, 0.0, 0.0, 0.0, inertia_upper, 0.0, 0.0, 0.0, inertia_upper)
 
         shape_cfg = newton.ModelBuilder.ShapeConfig(
+            thickness=1e-5,
             sdf_max_resolution=64,
             is_hydroelastic=True,
             sdf_narrow_band_range=(-0.1, 0.1),
             contact_margin=0.01,
-            k_hydro=k_hydro,
+            kh=kh_val,
             density=0.0,
         )
 
@@ -278,9 +308,9 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
         lower_pos = wp.vec3(x_pos, 0.0, box_half_lower)
         body_lower = builder.add_body(
             xform=wp.transform(p=lower_pos, q=wp.quat_identity()),
-            key=f"lower_{i}",
+            label=f"lower_{i}",
             mass=mass_lower,
-            I_m=I_m_lower,
+            inertia=I_m_lower,
         )
         shape_lower = builder.add_shape_box(
             body_lower, hx=box_half_lower, hy=box_half_lower, hz=box_half_lower, cfg=shape_cfg
@@ -294,9 +324,9 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
         upper_pos = wp.vec3(x_pos, 0.0, upper_z)
         body_upper = builder.add_body(
             xform=wp.transform(p=upper_pos, q=wp.quat_identity()),
-            key=f"upper_{i}",
+            label=f"upper_{i}",
             mass=mass_upper,
-            I_m=I_m_upper,
+            inertia=I_m_upper,
         )
         shape_upper = builder.add_shape_box(body_upper, hx=upper_half, hy=upper_half, hz=upper_half, cfg=shape_cfg)
         upper_body_indices.append(body_upper)
@@ -316,7 +346,6 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
         nconmax=2000,
         iterations=20,
         ls_iterations=100,
-        ls_parallel=True,
         impratio=1000.0,
     )
 
@@ -326,32 +355,34 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
 
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
 
-    sdf_config = SDFHydroelasticConfig(output_contact_surface=True)
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(
+    sdf_config = HydroelasticSDF.Config(output_contact_surface=True)
+    collision_pipeline = newton.CollisionPipeline(
         model,
-        rigid_contact_max_per_pair=100,
-        broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
+        broad_phase="explicit",
         sdf_hydroelastic_config=sdf_config,
     )
+    # Enable contact surface output for this test (validates penetration depth)
+    collision_pipeline.set_output_contact_surface(True)
+    contacts = collision_pipeline.contacts()
 
     # Simulate for 3 seconds to reach equilibrium
     sim_dt = 1.0 / 60.0
     substeps = 10
     sim_time = 3.0
     num_frames = int(sim_time / sim_dt)
+    total_steps = num_frames * substeps
 
-    for _ in range(num_frames):
-        for _ in range(substeps):
-            state_0.clear_forces()
-            # Apply external force to upper boxes
-            forces = np.zeros(model.body_count * 6, dtype=np.float32)
-            for body_idx in upper_body_indices:
-                forces[body_idx * 6 + 2] = -external_force
-            state_0.body_f.assign(forces)
+    # Pre-compute forces as a Warp array
+    forces_np = np.zeros(model.body_count * 6, dtype=np.float32)
+    for body_idx in upper_body_indices:
+        forces_np[body_idx * 6 + 2] = -external_force
+    precomputed_forces = wp.array(forces_np.reshape(model.body_count, 6), dtype=wp.spatial_vector, device=device)
 
-            contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
-            solver.step(state_0, state_1, control, contacts, sim_dt / substeps)
-            state_0, state_1 = state_1, state_0
+    for _ in range(total_steps):
+        wp.copy(state_0.body_f, precomputed_forces)
+        collision_pipeline.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, sim_dt / substeps)
+        state_0, state_1 = state_1, state_0
 
     # Check that upper cubes are near their original positions
     body_q = state_0.body_q.numpy()
@@ -386,7 +417,7 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
     for i in range(len(test_cases)):
         lower_shape = lower_shape_indices[i]
         upper_shape = upper_shape_indices[i]
-        k_hydro = k_hydros[i]
+        kh_val = kh_values[i]
         area = areas[i]
 
         # Filter depths for this shape pair
@@ -394,15 +425,17 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
             (shape_pairs[:, 0] == upper_shape) & (shape_pairs[:, 1] == lower_shape)
         )
         instance_depths = depths[mask]
-        instance_depths = instance_depths[instance_depths > 0]  # only consider positive depths = penetrating
+        # Standard convention: negative depth = penetrating
+        instance_depths = instance_depths[instance_depths < 0]
 
-        test.assertGreater(len(instance_depths), 0, f"Case {i} should have positive depth contacts")
+        test.assertGreater(len(instance_depths), 0, f"Case {i} should have penetrating contacts (negative depth)")
 
-        measured = 2.0 * np.mean(instance_depths)  # x2 because this is the distance to the isosurface
+        # x2 because depth is distance to isosurface; use |depth| for magnitude
+        measured = 2.0 * np.mean(-instance_depths)
 
         # Expected: depth = F / (k_eff * A_eff) / mujoco_scaling
-        effective_area = area * 0.9  # scale factor to account for non-uniform pressure distribution
-        expected = total_force / (k_hydro * effective_area)
+        effective_area = area
+        expected = total_force / (kh_val * effective_area)
         expected /= effective_mass
         ratio = measured / expected
 
@@ -444,7 +477,8 @@ class TestHydroelastic(unittest.TestCase):
             return
 
         sim_time = 0.0
-        contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
+        contacts = collision_pipeline.contacts()
+        collision_pipeline.collide(state_0, contacts)
 
         print(
             f"\nRunning {shape_type.value} cubes simulation with {solver_name} solver for {VIEWER_NUM_FRAMES} frames..."

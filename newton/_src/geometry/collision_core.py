@@ -40,42 +40,6 @@ _vec1 = wp.types.vector(1, wp.float32)
 
 
 @wp.func
-def build_pair_key2(shape_a: wp.uint32, shape_b: wp.uint32) -> wp.uint64:
-    """
-    Build a 64-bit key from two shape indices.
-    Upper 32 bits: shape_a
-    Lower 32 bits: shape_b
-    """
-    key = wp.uint64(shape_a)
-    key = key << wp.uint64(32)
-    key = key | wp.uint64(shape_b)
-    return key
-
-
-@wp.func
-def build_pair_key3(shape_a: wp.uint32, shape_b: wp.uint32, triangle_idx: wp.uint32) -> wp.uint64:
-    """
-    Build a 63-bit key from two shape indices and a triangle index (MSB is 0 for signed int64 compatibility).
-    Bit 63: 0 (reserved for sign bit)
-    Bits 62-43: shape_a (20 bits)
-    Bits 42-23: shape_b (20 bits)
-    Bits 22-0: triangle_idx (23 bits)
-
-    Max values: shape_a < 2^20 (1,048,576), shape_b < 2^20 (1,048,576), triangle_idx < 2^23 (8,388,608)
-    """
-    assert shape_a < wp.uint32(1048576), "shape_a must be < 2^20 (1,048,576)"
-    assert shape_b < wp.uint32(1048576), "shape_b must be < 2^20 (1,048,576)"
-    assert triangle_idx < wp.uint32(8388608), "triangle_idx must be < 2^23 (8,388,608)"
-
-    key = wp.uint64(shape_a & wp.uint32(0xFFFFF))  # Mask to 20 bits
-    key = key << wp.uint64(20)
-    key = key | wp.uint64(shape_b & wp.uint32(0xFFFFF))  # Mask to 20 bits
-    key = key << wp.uint64(23)
-    key = key | wp.uint64(triangle_idx & wp.uint32(0x7FFFFF))  # Mask to 23 bits
-    return key
-
-
-@wp.func
 def is_discrete_shape(shape_type: int) -> bool:
     """A discrete shape can be represented with a finite amount of flat polygon faces."""
     return (
@@ -313,7 +277,6 @@ def create_compute_gjk_mpr_contacts(
         thickness_a: float,
         thickness_b: float,
         writer_data: Any,
-        pair_key: wp.uint64,
     ):
         """
         Compute contacts between two shapes using GJK/MPR algorithm and write them.
@@ -361,7 +324,6 @@ def create_compute_gjk_mpr_contacts(
         contact_template.shape_a = shape_a
         contact_template.shape_b = shape_b
         contact_template.margin = rigid_contact_margin
-        contact_template.feature_pair_key = pair_key
 
         if wp.static(ENABLE_MULTI_CONTACT):
             wp.static(create_solve_convex_multi_contact(support_map, writer_func, post_process_contact))(
@@ -430,30 +392,29 @@ def compute_tight_aabb_from_support(
 
     # Compute AABB extents by evaluating support function in local space
     # Dot products are done in local space to avoid expensive rotations
-    support_point = wp.vec3()
 
     # Max X: support along +local_x, dot in local space
-    support_point, _feature_id = support_map(shape_data, local_x, data_provider)
+    support_point = support_map(shape_data, local_x, data_provider)
     max_x = wp.dot(local_x, support_point)
 
     # Max Y: support along +local_y, dot in local space
-    support_point, _feature_id = support_map(shape_data, local_y, data_provider)
+    support_point = support_map(shape_data, local_y, data_provider)
     max_y = wp.dot(local_y, support_point)
 
     # Max Z: support along +local_z, dot in local space
-    support_point, _feature_id = support_map(shape_data, local_z, data_provider)
+    support_point = support_map(shape_data, local_z, data_provider)
     max_z = wp.dot(local_z, support_point)
 
     # Min X: support along -local_x, dot in local space
-    support_point, _feature_id = support_map(shape_data, -local_x, data_provider)
+    support_point = support_map(shape_data, -local_x, data_provider)
     min_x = wp.dot(local_x, support_point)
 
     # Min Y: support along -local_y, dot in local space
-    support_point, _feature_id = support_map(shape_data, -local_y, data_provider)
+    support_point = support_map(shape_data, -local_y, data_provider)
     min_y = wp.dot(local_y, support_point)
 
     # Min Z: support along -local_z, dot in local space
-    support_point, _feature_id = support_map(shape_data, -local_z, data_provider)
+    support_point = support_map(shape_data, -local_z, data_provider)
     min_z = wp.dot(local_z, support_point)
 
     # AABB in world space (add world position to extents)
@@ -646,6 +607,9 @@ def create_find_contacts(writer_func: Any):
             thickness_b: Thickness of shape B
             writer_data: Data structure for contact writer
         """
+        if writer_data.contact_count[0] >= writer_data.contact_max:
+            return
+
         # Convert infinite planes to cube proxies for GJK/MPR compatibility
         # Use the OTHER object's radius to properly size the cube
         # Only convert if it's an infinite plane (finite planes can be handled normally)
@@ -665,9 +629,6 @@ def create_find_contacts(writer_func: Any):
                 shape_data_b, quat_b, pos_b, pos_a, bsphere_radius_a + rigid_contact_margin
             )
 
-        # Build pair key for contact matching
-        pair_key = build_pair_key2(wp.uint32(shape_a), wp.uint32(shape_b))
-
         # Compute and write contacts using GJK/MPR
         wp.static(create_compute_gjk_mpr_contacts(writer_func))(
             shape_data_a,
@@ -682,7 +643,6 @@ def create_find_contacts(writer_func: Any):
             thickness_a,
             thickness_b,
             writer_data,
-            pair_key,
         )
 
     return find_contacts
@@ -935,7 +895,7 @@ def mesh_vs_convex_midphase(
 def find_pair_from_cumulative_index(
     global_idx: int,
     cumulative_sums: wp.array(dtype=int),
-    num_pairs: int,
+    pair_count: int,
 ) -> tuple[int, int]:
     """
     Binary search to find which pair a global index belongs to.
@@ -946,14 +906,14 @@ def find_pair_from_cumulative_index(
     Args:
         global_idx: Global index to search for
         cumulative_sums: Array of inclusive cumulative sums (end indices for each pair)
-        num_pairs: Number of pairs
+        pair_count: Number of pairs
 
     Returns:
         Tuple of (pair_index, local_index_within_pair)
     """
     # Use binary_search to find first index where cumulative_sums[i] > global_idx
     # This gives us the bucket that contains global_idx
-    pair_idx = binary_search(cumulative_sums, global_idx, 0, num_pairs)
+    pair_idx = binary_search(cumulative_sums, global_idx, 0, pair_count)
 
     # Get cumulative start for this pair to calculate local index
     cumulative_start = int(0)

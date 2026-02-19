@@ -45,7 +45,7 @@ def test_revolute_controller(
     box_mass = 1.0
     box_inertia = wp.mat33((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
     # easy case: identity transform, zero center of mass
-    b = builder.add_link(armature=0.0, I_m=box_inertia, mass=box_mass)
+    b = builder.add_link(armature=0.0, inertia=box_inertia, mass=box_mass)
     builder.add_shape_box(body=b, hx=0.2, hy=0.2, hz=0.2, cfg=newton.ModelBuilder.ShapeConfig(density=1))
 
     # Create a revolute joint
@@ -64,6 +64,7 @@ def test_revolute_controller(
         limit_kd=0.0,
         target_ke=target_ke,
         target_kd=target_kd,
+        actuator_mode=newton.ActuatorMode.POSITION_VELOCITY,
     )
     builder.add_articulation([j])
 
@@ -114,7 +115,7 @@ def test_ball_controller(
     box_mass = 1.0
     box_inertia = wp.mat33((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
     # easy case: identity transform, zero center of mass
-    b = builder.add_link(armature=0.0, I_m=box_inertia, mass=box_mass)
+    b = builder.add_link(armature=0.0, inertia=box_inertia, mass=box_mass)
     builder.add_shape_box(body=b, hx=0.2, hy=0.2, hz=0.2, cfg=newton.ModelBuilder.ShapeConfig(density=1))
 
     # Create a ball joint
@@ -124,6 +125,7 @@ def test_ball_controller(
         parent_xform=wp.transform(wp.vec3(0.0, 2.0, 0.0), wp.quat_identity()),
         child_xform=wp.transform(wp.vec3(0.0, 2.0, 0.0), wp.quat_identity()),
         armature=0.0,
+        actuator_mode=newton.ActuatorMode.POSITION_VELOCITY,
     )
     builder.add_articulation([j])
 
@@ -199,7 +201,7 @@ def test_effort_limit_clamping(
     box_mass = 1.0
     inertia_value = 0.1
     box_inertia = wp.mat33((inertia_value, 0.0, 0.0), (0.0, inertia_value, 0.0), (0.0, 0.0, inertia_value))
-    b = builder.add_link(armature=0.0, I_m=box_inertia, mass=box_mass)
+    b = builder.add_link(armature=0.0, inertia=box_inertia, mass=box_mass)
     builder.add_shape_box(body=b, hx=0.1, hy=0.1, hz=0.1, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
 
     # High PD gains should be clamped by low effort_limit
@@ -221,6 +223,7 @@ def test_effort_limit_clamping(
         target_ke=high_kp,
         target_kd=high_kd,
         effort_limit=effort_limit,
+        actuator_mode=newton.ActuatorMode.POSITION_VELOCITY,
     )
     builder.add_articulation([j])
 

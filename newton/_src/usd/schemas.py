@@ -14,12 +14,12 @@
 # limitations under the License.
 
 """
-USD schema resolvers. Currently not used.
+USD schema resolvers.
 """
 
 from typing import ClassVar
 
-from ..geometry import MESH_MAXHULLVERT
+from ..sim.builder import ModelBuilder
 from ..usd.schema_resolver import PrimType, SchemaAttribute, SchemaResolver
 
 
@@ -34,12 +34,12 @@ class SchemaResolverNewton(SchemaResolver):
     name: ClassVar[str] = "newton"
     mapping: ClassVar[dict[PrimType, dict[str, SchemaAttribute]]] = {
         PrimType.SCENE: {
-            "time_step": SchemaAttribute("newton:timeStep", 0.002),
-            "max_solver_iterations": SchemaAttribute("newton:maxSolverIterations", 5),
-            "enable_gravity": SchemaAttribute("newton:enableGravity", True),
-            "rigid_contact_margin": SchemaAttribute("newton:rigidContactMargin", 0.0),
+            "max_solver_iterations": SchemaAttribute("newton:maxSolverIterations", -1),
+            "time_steps_per_second": SchemaAttribute("newton:timeStepsPerSecond", 1000),
+            "gravity_enabled": SchemaAttribute("newton:gravityEnabled", True),
         },
         PrimType.JOINT: {
+            # warning: there is no NewtonJointAPI, none of these are schema attributes
             "armature": SchemaAttribute("newton:armature", 1.0e-2),
             "friction": SchemaAttribute("newton:friction", 0.0),
             "limit_linear_ke": SchemaAttribute("newton:linear:limitStiffness", 1.0e4),
@@ -64,41 +64,17 @@ class SchemaResolverNewton(SchemaResolver):
             "rotZ_velocity": SchemaAttribute("newton:rotZ:velocity", 0.0),
         },
         PrimType.SHAPE: {
-            "mesh_hull_vertex_limit": SchemaAttribute("newton:hullVertexLimit", -1),
-            # Use ShapeConfig.thickness default for contact margin
-            "rigid_contact_margin": SchemaAttribute("newton:rigidContactMargin", 1.0e-5),
+            # Mesh
+            "max_hull_vertices": SchemaAttribute("newton:maxHullVertices", -1),
+            # Collisions
+            "contact_margin": SchemaAttribute("newton:contactMargin", float("-inf")),
         },
-        PrimType.BODY: {
-            "rigid_body_linear_damping": SchemaAttribute("newton:damping", 0.0),
-        },
+        PrimType.BODY: {},
         PrimType.MATERIAL: {
-            "priority": SchemaAttribute("newton:priority", 0),
-            "weight": SchemaAttribute("newton:weight", 1.0),
-            "stiffness": SchemaAttribute("newton:stiffness", 1.0e5),
-            "damping": SchemaAttribute("newton:damping", 1000.0),
+            "mu_torsional": SchemaAttribute("newton:torsionalFriction", 0.25),
+            "mu_rolling": SchemaAttribute("newton:rollingFriction", 0.0005),
         },
-        PrimType.ACTUATOR: {
-            # Mirror MuJoCo actuator defaults when applicable
-            "ctrl_low": SchemaAttribute("newton:ctrlRange:low", 0.0),
-            "ctrl_high": SchemaAttribute("newton:ctrlRange:high", 0.0),
-            "force_low": SchemaAttribute("newton:forceRange:low", 0.0),
-            "force_high": SchemaAttribute("newton:forceRange:high", 0.0),
-            "act_low": SchemaAttribute("newton:actRange:low", 0.0),
-            "act_high": SchemaAttribute("newton:actRange:high", 0.0),
-            "length_low": SchemaAttribute("newton:lengthRange:low", 0.0),
-            "length_high": SchemaAttribute("newton:lengthRange:high", 0.0),
-            "gainPrm": SchemaAttribute("newton:gainPrm", [1, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-            "gainType": SchemaAttribute("newton:gainType", "fixed"),
-            "biasPrm": SchemaAttribute("newton:biasPrm", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-            "biasType": SchemaAttribute("newton:biasType", "none"),
-            "dynPrm": SchemaAttribute("newton:dynPrm", [1, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-            "dynType": SchemaAttribute("newton:dynType", "none"),
-            # The following have no MuJoCo counterpart; keep unspecified defaults
-            "speedTorqueGradient": SchemaAttribute("newton:speedTorqueGradient", None),
-            "torqueSpeedGradient": SchemaAttribute("newton:torqueSpeedGradient", None),
-            "maxVelocity": SchemaAttribute("newton:maxVelocity", None),
-            "gear": SchemaAttribute("newton:gear", [1, 0, 0, 0, 0, 0]),
-        },
+        PrimType.ACTUATOR: {},
     }
 
 
@@ -134,12 +110,9 @@ class SchemaResolverPhysx(SchemaResolver):
 
     mapping: ClassVar[dict[PrimType, dict[str, SchemaAttribute]]] = {
         PrimType.SCENE: {
-            "time_step": SchemaAttribute(
-                "physxScene:timeStepsPerSecond", 60, lambda hz: (1.0 / hz) if (hz and hz > 0) else None
-            ),
             "max_solver_iterations": SchemaAttribute("physxScene:maxVelocityIterationCount", 255),
-            "enable_gravity": SchemaAttribute("physxRigidBody:disableGravity", False, lambda value: not value),
-            "rigid_contact_margin": SchemaAttribute("physxScene:contactOffset", 0.0),
+            "time_steps_per_second": SchemaAttribute("physxScene:timeStepsPerSecond", 60),
+            "gravity_enabled": SchemaAttribute("physxRigidBody:disableGravity", False, lambda value: not value),
         },
         PrimType.JOINT: {
             "armature": SchemaAttribute("physxJoint:armature", 0.0),
@@ -172,10 +145,10 @@ class SchemaResolverPhysx(SchemaResolver):
             "rotZ_velocity": SchemaAttribute("state:rotZ:physics:velocity", 0.0),
         },
         PrimType.SHAPE: {
-            # Mesh hull vertex limit
-            "mesh_hull_vertex_limit": SchemaAttribute("physxConvexHullCollision:hullVertexLimit", 64),
-            # Collision contact offset
-            "rigid_contact_margin": SchemaAttribute("physxCollision:contactOffset", float("-inf")),
+            # Mesh
+            "max_hull_vertices": SchemaAttribute("physxConvexHullCollision:hullVertexLimit", 64),
+            # Collisions
+            "contact_margin": SchemaAttribute("physxCollision:contactOffset", float("-inf")),
         },
         PrimType.MATERIAL: {
             "stiffness": SchemaAttribute("physxMaterial:compliantContactStiffness", 0.0),
@@ -251,10 +224,11 @@ class SchemaResolverMjc(SchemaResolver):
 
     mapping: ClassVar[dict[PrimType, dict[str, SchemaAttribute]]] = {
         PrimType.SCENE: {
-            "time_step": SchemaAttribute("mjc:option:timestep", 0.002),
             "max_solver_iterations": SchemaAttribute("mjc:option:iterations", 100),
-            "enable_gravity": SchemaAttribute("mjc:flag:gravity", True),
-            "rigid_contact_margin": SchemaAttribute("mjc:option:o_margin", 0.0),
+            "time_steps_per_second": SchemaAttribute(
+                "mjc:option:timestep", 0.002, lambda s: int(1.0 / s) if (s and s > 0) else None
+            ),
+            "gravity_enabled": SchemaAttribute("mjc:flag:gravity", True),
         },
         PrimType.JOINT: {
             "armature": SchemaAttribute("mjc:armature", 0.0),
@@ -279,12 +253,13 @@ class SchemaResolverMjc(SchemaResolver):
         },
         PrimType.SHAPE: {
             # Mesh
-            "mesh_hull_vertex_limit": SchemaAttribute("mjc:maxhullvert", MESH_MAXHULLVERT),
-            # Collisions
-            "rigid_contact_margin": SchemaAttribute("mjc:margin", 0.0),
+            "max_hull_vertices": SchemaAttribute("mjc:maxhullvert", -1),
         },
         PrimType.MATERIAL: {
-            # Materials and contact models
+            # Materials
+            "mu_torsional": SchemaAttribute("mjc:torsionalfriction", 0.005),
+            "mu_rolling": SchemaAttribute("mjc:rollingfriction", 0.0001),
+            # Contact models
             "priority": SchemaAttribute("mjc:priority", 0),
             "weight": SchemaAttribute("mjc:solmix", 1.0),
             "stiffness": SchemaAttribute("mjc:solref", [0.02, 1.0], solref_to_stiffness),
@@ -313,3 +288,20 @@ class SchemaResolverMjc(SchemaResolver):
             "gear": SchemaAttribute("mjc:gear", [1, 0, 0, 0, 0, 0]),
         },
     }
+
+    def validate_custom_attributes(self, builder: ModelBuilder) -> None:
+        """
+        Validate that MuJoCo custom attributes have been registered on the builder.
+
+        Users must call :meth:`SolverMuJoCo.register_custom_attributes` before parsing
+        USD files with this resolver.
+
+        Raises:
+            RuntimeError: If required MuJoCo custom attributes are not registered.
+        """
+        has_mujoco_attrs = any(attr.namespace == "mujoco" for attr in builder.custom_attributes.values())
+        if not has_mujoco_attrs:
+            raise RuntimeError(
+                "MuJoCo custom attributes not registered. "
+                "Call SolverMuJoCo.register_custom_attributes(builder) before parsing USD with SchemaResolverMjc."
+            )

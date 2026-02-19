@@ -206,6 +206,7 @@ class ViewerUSD(ViewerBase):
         indices: wp.array,
         normals: wp.array | None = None,
         uvs: wp.array | None = None,
+        texture=None,
         hidden=False,
         backface_culling=True,
     ):
@@ -480,17 +481,14 @@ class ViewerUSD(ViewerBase):
 
     @override
     def log_points(self, name, points, radii, colors, hidden=False):
+        num_points = len(points)
+
         if np.isscalar(radii):
             radius_interp = "constant"
         else:
             radius_interp = "vertex"
 
-        if colors is None:
-            color_interp = "constant"
-        elif len(colors) == 3 and all(np.isscalar(x) for x in colors):
-            color_interp = "constant"
-        else:
-            color_interp = "vertex"
+        colors, color_interp = self._normalize_point_colors(colors, num_points)
 
         path = self._get_path(name)
         instancer = UsdGeom.Points.Get(self.stage, path)
@@ -514,11 +512,6 @@ class ViewerUSD(ViewerBase):
         instancer.GetWidthsAttr().Set(widths, self._frame_index)
 
         if colors is not None:
-            if isinstance(colors, wp.array):
-                colors = colors.numpy()
-            elif isinstance(colors, list | tuple) and len(colors) == 3:
-                colors = (colors,)
-
             instancer.GetDisplayColorAttr().Set(colors, self._frame_index)
 
         instancer.GetVisibilityAttr().Set("inherited" if not hidden else "invisible", self._frame_index)
@@ -568,6 +561,40 @@ class ViewerUSD(ViewerBase):
         else:
             # Fallback for other formats
             return np.array(colors)
+
+    @staticmethod
+    def _is_single_rgb_triplet(colors) -> bool:
+        """Returns True when colors represent one RGB triplet."""
+        if isinstance(colors, np.ndarray):
+            return colors.ndim == 1 and colors.shape[0] == 3
+
+        if isinstance(colors, list | tuple):
+            return len(colors) == 3 and all(np.isscalar(x) for x in colors)
+
+        return False
+
+    def _normalize_point_colors(self, colors, num_points):
+        """Normalize point colors and return (values, interpolation token)."""
+        if colors is None:
+            return None, "constant"
+
+        if isinstance(colors, wp.array):
+            colors = colors.numpy()
+
+        if self._is_single_rgb_triplet(colors):
+            colors_arr = np.asarray(colors, dtype=np.float32)
+            return colors_arr.reshape(1, 3), "constant"
+
+        if isinstance(colors, np.ndarray):
+            return colors, "vertex"
+
+        if isinstance(colors, list | tuple):
+            # Keep list/tuple inputs as-is for existing valid per-point color inputs.
+            if len(colors) == num_points:
+                return colors, "vertex"
+            return np.asarray(colors), "vertex"
+
+        return np.asarray(colors), "vertex"
 
     @staticmethod
     def _ensure_scopes_for_path(stage: Usd.Stage, prim_path_str: str):

@@ -18,7 +18,7 @@ import unittest
 import warp as wp
 
 import newton
-from newton.sensors import SensorContact, populate_contacts
+from newton.sensors import SensorContact
 from newton.solvers import SolverMuJoCo
 from newton.tests.unittest_utils import assert_np_equal
 
@@ -29,37 +29,40 @@ class MockModel:
     def __init__(self, device=None):
         self.device = device or wp.get_device()
 
+    def request_contact_attributes(self, *args):
+        pass
 
-def create_contacts(device, pairs, naconmax, positions=None, normals=None, separations=None, forces=None):
-    """Helper to create Contacts with specified contacts"""
-    contacts = newton.Contacts(0, 0)
 
+def create_contacts(device, pairs, naconmax, normals=None, forces=None):
+    """Helper to create Contacts with specified contacts.
+
+    The force spatial vectors are computed as (magnitude * normal, 0, 0, 0) to match
+    the convention that contacts.force stores the force on body0 from body1.
+    """
+    contacts = newton.Contacts(naconmax, 0, device=device, requested_attributes={"force"})
     n_contacts = len(pairs)
 
-    if positions is None:
-        positions = [[0.0, 0.0, 0.0]] * n_contacts
     if normals is None:
         normals = [[0.0, 0.0, 1.0]] * n_contacts
-    if separations is None:
-        separations = [-0.1] * n_contacts
     if forces is None:
         forces = [0.1] * n_contacts
 
-    pairs_padded = pairs + [(-1, -1)] * (naconmax - n_contacts)
-    positions_padded = positions + [[0.0, 0.0, 0.0]] * (naconmax - n_contacts)
-    normals_padded = normals + [[0.0, 0.0, 0.0]] * (naconmax - n_contacts)
-    separations_padded = separations + [0.0] * (naconmax - n_contacts)
-    forces_padded = forces + [0.0] * (naconmax - n_contacts)
+    padding = naconmax - n_contacts
+    shapes0 = [p[0] for p in pairs] + [-1] * padding
+    shapes1 = [p[1] for p in pairs] + [-1] * padding
+    normals_padded = normals + [[0.0, 0.0, 0.0]] * padding
+
+    # Build spatial force vectors: linear force = magnitude * normal, angular = 0
+    forces_spatial = [(f * n[0], f * n[1], f * n[2], 0.0, 0.0, 0.0) for f, n in zip(forces, normals, strict=True)] + [
+        (0.0,) * 6
+    ] * padding
 
     with wp.ScopedDevice(device):
-        contacts.pair = wp.array(pairs_padded, dtype=wp.vec2i)
-        contacts.position = wp.array(positions_padded, dtype=wp.vec3f)
-        contacts.normal = wp.array(normals_padded, dtype=wp.vec3f)
-        contacts.separation = wp.array(separations_padded, dtype=wp.float32)
-        contacts.force = wp.array(forces_padded, dtype=wp.float32)
-
+        contacts.rigid_contact_shape0 = wp.array(shapes0, dtype=wp.int32)
+        contacts.rigid_contact_shape1 = wp.array(shapes1, dtype=wp.int32)
+        contacts.rigid_contact_normal = wp.array(normals_padded, dtype=wp.vec3f)
         contacts.rigid_contact_count = wp.array([n_contacts], dtype=wp.int32)
-        contacts.rigid_contact_max = naconmax
+        contacts.force = wp.array(forces_spatial, dtype=wp.spatial_vector)
 
     return contacts
 
@@ -74,55 +77,27 @@ class TestSensorContact(unittest.TestCase):
         entity_B = (2,)
 
         model = MockModel()
-        model.body_key = ["A", "B"]
+        model.body_label = ["A", "B"]
         model.body_shapes = [entity_A, entity_B]
 
         contact_sensor = SensorContact(model, sensing_obj_bodies="*", counterpart_bodies="*")
 
         test_contacts = [
-            {
-                "pair": (0, 2),
-                "position": [0.0, 0.0, 0.0],
-                "normal": [0.0, 0.0, 1.0],
-                "separation": -0.01,
-                "force": 1.0,
-            },
-            {
-                "pair": (1, 2),
-                "position": [0.1, 0.0, 0.0],
-                "normal": [1.0, 0.0, 0.0],
-                "separation": -0.02,
-                "force": 2.0,
-            },
-            {
-                "pair": (2, 1),
-                "position": [0.2, 0.0, 0.0],
-                "normal": [0.0, 1.0, 0.0],
-                "separation": -0.015,
-                "force": 1.5,
-            },
-            {
-                "pair": (0, 3),
-                "position": [0.3, 0.0, 0.0],
-                "normal": [0.0, 0.0, -1.0],
-                "separation": -0.005,
-                "force": 0.5,
-            },
+            {"pair": (0, 2), "normal": [0.0, 0.0, -1.0], "force": 1.0},
+            {"pair": (1, 2), "normal": [-1.0, 0.0, 0.0], "force": 2.0},
+            {"pair": (2, 1), "normal": [0.0, -1.0, 0.0], "force": 1.5},
+            {"pair": (0, 3), "normal": [0.0, 0.0, 1.0], "force": 0.5},
         ]
 
         pairs = [contact["pair"] for contact in test_contacts]
-        positions = [contact["position"] for contact in test_contacts]
         normals = [contact["normal"] for contact in test_contacts]
-        separations = [contact["separation"] for contact in test_contacts]
         forces = [contact["force"] for contact in test_contacts]
 
         test_scenarios = [
             {
                 "name": "no_contacts",
                 "pairs": [],
-                "positions": [],
                 "normals": [],
-                "separations": [],
                 "forces": [],
                 "force_A_vs_B": (0.0, 0.0, 0.0),
                 "force_B_vs_A": (0.0, 0.0, 0.0),
@@ -132,9 +107,7 @@ class TestSensorContact(unittest.TestCase):
             {
                 "name": "only_contact_0",
                 "pairs": pairs[:1],
-                "positions": positions[:1],
                 "normals": normals[:1],
-                "separations": separations[:1],
                 "forces": forces[:1],
                 "force_A_vs_B": (0.0, 0.0, 1.0),
                 "force_B_vs_A": (0.0, 0.0, -1.0),
@@ -144,9 +117,7 @@ class TestSensorContact(unittest.TestCase):
             {
                 "name": "only 1",
                 "pairs": pairs[1:2],
-                "positions": positions[1:2],
                 "normals": normals[1:2],
-                "separations": separations[1:2],
                 "forces": forces[1:2],
                 "force_A_vs_B": (2.0, 0.0, 0.0),
                 "force_B_vs_A": (-2.0, 0.0, 0.0),
@@ -156,9 +127,7 @@ class TestSensorContact(unittest.TestCase):
             {
                 "name": "only 2",
                 "pairs": pairs[2:3],
-                "positions": positions[2:3],
                 "normals": normals[2:3],
-                "separations": separations[2:3],
                 "forces": forces[2:3],
                 "force_A_vs_B": (0.0, -1.5, 0.0),
                 "force_B_vs_A": (0.0, 1.5, 0.0),
@@ -168,9 +137,7 @@ class TestSensorContact(unittest.TestCase):
             {
                 "name": "all_contacts",
                 "pairs": pairs,
-                "positions": positions,
                 "normals": normals,
-                "separations": separations,
                 "forces": forces,
                 "force_A_vs_B": (2.0, -1.5, 1.0),
                 "force_B_vs_A": (-2.0, 1.5, -1.0),
@@ -185,9 +152,7 @@ class TestSensorContact(unittest.TestCase):
                     device,
                     scenario["pairs"],
                     naconmax=10,
-                    positions=scenario["positions"],
                     normals=scenario["normals"],
-                    separations=scenario["separations"],
                     forces=scenario["forces"],
                 )
 
@@ -216,10 +181,10 @@ class TestSensorContactMuJoCo(unittest.TestCase):
         builder.default_shape_cfg.kd = 1000.0
         builder.default_shape_cfg.density = 1000.0
 
-        builder.add_shape_box(body=-1, hx=1.0, hy=1.0, hz=0.25, key="base")
-        body_a = builder.add_body(xform=wp.transform(wp.vec3(0, 0, 0.8), wp.quat_identity()), key="a")
+        builder.add_shape_box(body=-1, hx=1.0, hy=1.0, hz=0.25, label="base")
+        body_a = builder.add_body(xform=wp.transform(wp.vec3(0, 0, 0.8), wp.quat_identity()), label="a")
         builder.add_shape_box(body_a, hx=0.15, hy=0.15, hz=0.25)
-        body_b = builder.add_body(xform=wp.transform(wp.vec3(0, 0, 1.15), wp.quat_identity()), key="b")
+        body_b = builder.add_body(xform=wp.transform(wp.vec3(0, 0, 1.15), wp.quat_identity()), label="b")
         builder.add_shape_box(body_b, hx=0.1, hy=0.1, hz=0.05)
 
         model = builder.finalize()
@@ -231,14 +196,40 @@ class TestSensorContactMuJoCo(unittest.TestCase):
             self.skipTest(f"MuJoCo not available: {e}")
 
         sensor = SensorContact(model, sensing_obj_bodies=["a", "b"])
-        contacts = newton.Contacts(0, 0)
+        contacts = newton.Contacts(
+            solver.get_max_contact_count(),
+            0,
+            device=model.device,
+            requested_attributes=model.get_requested_contact_attributes(),
+        )
 
         # Simulate 2s
         state_in, state_out, control = model.state(), model.state(), model.control()
-        for _ in range(240 * 2):
-            solver.step(state_in, state_out, control, contacts, 1.0 / 240.0)
+        sim_dt = 1.0 / 240.0
+        num_steps = 240 * 2
+
+        device = model.device
+        use_cuda_graph = device.is_cuda and wp.is_mempool_enabled(device)
+        if use_cuda_graph:
+            # warmup (2 steps to allocate both buffers)
+            solver.step(state_in, state_out, control, None, sim_dt)
+            solver.step(state_out, state_in, control, None, sim_dt)
+            with wp.ScopedCapture(device) as capture:
+                solver.step(state_in, state_out, control, None, sim_dt)
+                solver.step(state_out, state_in, control, None, sim_dt)
+            graph = capture.graph
+
+        remaining = num_steps - (4 if use_cuda_graph else 0)
+        for _ in range(remaining // 2 if use_cuda_graph else remaining):
+            if use_cuda_graph:
+                wp.capture_launch(graph)
+            else:
+                solver.step(state_in, state_out, control, None, sim_dt)
+                state_in, state_out = state_out, state_in
+        if use_cuda_graph and remaining % 2 == 1:
+            solver.step(state_in, state_out, control, None, sim_dt)
             state_in, state_out = state_out, state_in
-        populate_contacts(contacts, solver)
+        solver.update_contacts(contacts, state_in)
         sensor.eval(contacts)
 
         forces = sensor.net_force.numpy()
@@ -253,12 +244,12 @@ class TestSensorContactMuJoCo(unittest.TestCase):
         builder.default_shape_cfg.kd = 1000.0
         builder.default_shape_cfg.density = 1000.0
 
-        builder.add_shape_box(body=-1, hx=2.0, hy=2.0, hz=0.25, key="base")
-        body_a = builder.add_body(xform=wp.transform(wp.vec3(-0.5, 0, 0.8), wp.quat_identity()), key="a")
+        builder.add_shape_box(body=-1, hx=2.0, hy=2.0, hz=0.25, label="base")
+        body_a = builder.add_body(xform=wp.transform(wp.vec3(-0.5, 0, 0.8), wp.quat_identity()), label="a")
         builder.add_shape_box(body_a, hx=0.15, hy=0.15, hz=0.25)
-        body_b = builder.add_body(xform=wp.transform(wp.vec3(0, 0, 0.6), wp.quat_identity()), key="b")
+        body_b = builder.add_body(xform=wp.transform(wp.vec3(0, 0, 0.6), wp.quat_identity()), label="b")
         builder.add_shape_box(body_b, hx=0.1, hy=0.1, hz=0.05)
-        body_c = builder.add_body(xform=wp.transform(wp.vec3(0.5, 0, 0.8), wp.quat_identity()), key="c")
+        body_c = builder.add_body(xform=wp.transform(wp.vec3(0.5, 0, 0.8), wp.quat_identity()), label="c")
         builder.add_shape_box(body_c, hx=0.1, hy=0.1, hz=0.25)
 
         model = builder.finalize()
@@ -271,14 +262,40 @@ class TestSensorContactMuJoCo(unittest.TestCase):
 
         sensor_abc = SensorContact(model, sensing_obj_bodies=["a", "b", "c"])
         sensor_base = SensorContact(model, sensing_obj_shapes=["base"])
-        contacts = newton.Contacts(0, 0)
+        contacts = newton.Contacts(
+            solver.get_max_contact_count(),
+            0,
+            device=model.device,
+            requested_attributes=model.get_requested_contact_attributes(),
+        )
 
         # Simulate 2s
         state_in, state_out, control = model.state(), model.state(), model.control()
-        for _ in range(240 * 2):
-            solver.step(state_in, state_out, control, contacts, 1.0 / 240.0)
+        sim_dt = 1.0 / 240.0
+        num_steps = 240 * 2
+
+        device = model.device
+        use_cuda_graph = device.is_cuda and wp.is_mempool_enabled(device)
+        if use_cuda_graph:
+            # warmup (2 steps to allocate both buffers)
+            solver.step(state_in, state_out, control, None, sim_dt)
+            solver.step(state_out, state_in, control, None, sim_dt)
+            with wp.ScopedCapture(device) as capture:
+                solver.step(state_in, state_out, control, None, sim_dt)
+                solver.step(state_out, state_in, control, None, sim_dt)
+            graph = capture.graph
+
+        remaining = num_steps - (4 if use_cuda_graph else 0)
+        for _ in range(remaining // 2 if use_cuda_graph else remaining):
+            if use_cuda_graph:
+                wp.capture_launch(graph)
+            else:
+                solver.step(state_in, state_out, control, None, sim_dt)
+                state_in, state_out = state_out, state_in
+        if use_cuda_graph and remaining % 2 == 1:
+            solver.step(state_in, state_out, control, None, sim_dt)
             state_in, state_out = state_out, state_in
-        populate_contacts(contacts, solver)
+        solver.update_contacts(contacts, state_in)
         sensor_abc.eval(contacts)
         sensor_base.eval(contacts)
 
