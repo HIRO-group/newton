@@ -252,62 +252,62 @@ class SolverSRXPBD(SolverBase):
                             model, state_in, state_out, particle_deltas, dt
                         )
 
-            if self._num_dynamic_groups > 0:
-                linear_momentum_b4_SM = wp.zeros(self._num_dynamic_groups, dtype=wp.vec3, device=model.device)
-                angular_momentum_b4_SM = wp.zeros(self._num_dynamic_groups, dtype=wp.vec3, device=model.device)
-                wp.launch(
-                    kernel=compute_momentum,
-                    dim=self._num_dynamic_groups,
-                    inputs=[
-                        particle_q,
-                        particle_qd,
-                        model.particle_flags,
-                        model.particle_mass,
-                        self._group_particle_start,
-                        self._group_particle_count,
-                        self._group_particles_flat,
-                    ],
-                    outputs=[linear_momentum_b4_SM, angular_momentum_b4_SM],
-                    device=model.device
-                )
-                particle_deltas.zero_()
-                wp.launch( # Shape matching can be called only once
-                    kernel=solve_shape_matching_batch,
-                    dim=self._num_dynamic_groups,
-                    inputs=[
-                        particle_q,
-                        self.particle_q_rest,
-                        model.particle_mass,
-                        model.particle_flags,
-                        self._group_particle_start,
-                        self._group_particle_count,
-                        self._group_particles_flat,
-                    ],
-                    outputs=[particle_deltas],
-                    device=model.device
-                )
-                particle_q, particle_qd = self.apply_particle_deltas(
-                    model, state_in, state_out, particle_deltas, dt
-                )
-                for _ in range(3): # TODO
-                    wp.launch(
-                        kernel=enforce_momemntum_conservation,
-                        dim=self._num_dynamic_groups,
-                        inputs=[
-                            particle_q,
-                            particle_qd,
-                            model.particle_flags,
-                            model.particle_mass,
-                            linear_momentum_b4_SM,
-                            angular_momentum_b4_SM,
-                            dt,
-                            self._group_particle_start,
-                            self._group_particle_count,
-                            self._group_particles_flat,
-                        ],
-                        outputs=[particle_q, particle_qd],
-                        device=model.device
-                    )
+                        if self._num_dynamic_groups > 0:
+                            linear_momentum_b4_SM = wp.zeros(self._num_dynamic_groups, dtype=wp.vec3, device=model.device)
+                            angular_momentum_b4_SM = wp.zeros(self._num_dynamic_groups, dtype=wp.vec3, device=model.device)
+                            wp.launch(
+                                kernel=compute_momentum,
+                                dim=self._num_dynamic_groups,
+                                inputs=[
+                                    particle_q,
+                                    particle_qd,
+                                    model.particle_flags,
+                                    model.particle_mass,
+                                    self._group_particle_start,
+                                    self._group_particle_count,
+                                    self._group_particles_flat,
+                                ],
+                                outputs=[linear_momentum_b4_SM, angular_momentum_b4_SM],
+                                device=model.device
+                            )
+                            
+                            particle_deltas.zero_()
+                            wp.launch( # Shape matching can be called only once
+                                kernel=solve_shape_matching_batch,
+                                dim=self._num_dynamic_groups,
+                                inputs=[
+                                    particle_q,
+                                    self.particle_q_rest,
+                                    model.particle_mass,
+                                    model.particle_flags,
+                                    self._group_particle_start,
+                                    self._group_particle_count,
+                                    self._group_particles_flat,
+                                ],
+                                outputs=[particle_deltas],
+                                device=model.device
+                            )
+                            particle_q, particle_qd = self.apply_particle_deltas(
+                                model, state_in, state_out, particle_deltas, dt
+                            )
+                            wp.launch(
+                                kernel=enforce_momemntum_conservation,
+                                dim=self._num_dynamic_groups,
+                                inputs=[
+                                    particle_q,
+                                    particle_qd,
+                                    model.particle_flags,
+                                    model.particle_mass,
+                                    linear_momentum_b4_SM,
+                                    angular_momentum_b4_SM,
+                                    dt,
+                                    self._group_particle_start,
+                                    self._group_particle_count,
+                                    self._group_particles_flat,
+                                ],
+                                outputs=[particle_q, particle_qd],
+                                device=model.device
+                            )
 
             if model.particle_count:
                 if particle_q.ptr != state_out.particle_q.ptr:
