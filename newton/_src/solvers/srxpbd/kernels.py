@@ -975,11 +975,10 @@ def solve_shape_matching_batch_tiled(
     M = group_mass[group_id]
     bd = wp.block_dim()
 
-    # --- Phase 1: Each thread accumulates its strided share ---
+    # --- Phase 1: Each thread accumulates its strided share (com, rest com, linear momentum) ---
     acc_mx = wp.vec3(0.0)
     acc_mx0 = wp.vec3(0.0)
     acc_p = wp.vec3(0.0)
-    acc_L = wp.vec3(0.0)
 
     p = lane
     while p < num_particles:
@@ -990,17 +989,28 @@ def solve_shape_matching_batch_tiled(
         v = particle_qd[idx]
         acc_mx += m * x
         acc_mx0 += m * x0
-        mv = m * v
-        acc_p += mv
-        acc_L += wp.cross(x, mv)
+        acc_p += m * v
         p += bd
 
     # --- Cooperative reduction across the block ---
     t = wp.tile_extract(wp.tile_reduce(wp.add, wp.tile(acc_mx, preserve_type=True)), 0) / M
     t0 = wp.tile_extract(wp.tile_reduce(wp.add, wp.tile(acc_mx0, preserve_type=True)), 0) / M
     P = wp.tile_extract(wp.tile_reduce(wp.add, wp.tile(acc_p, preserve_type=True)), 0)
-    L_origin = wp.tile_extract(wp.tile_reduce(wp.add, wp.tile(acc_L, preserve_type=True)), 0)
-    L = L_origin - wp.cross(t, P)
+    vcom = P / M
+
+    # --- Phase 1b: Angular momentum L = sum(cross(r, m * vrel)) ---
+    acc_L = wp.vec3(0.0)
+
+    p = lane
+    while p < num_particles:
+        idx = group_particles_flat[start_idx + p]
+        m = particle_mass[idx]
+        r = particle_q[idx] - t
+        vrel = particle_qd[idx] - vcom
+        acc_L += wp.cross(r, m * vrel)
+        p += bd
+
+    L = wp.tile_extract(wp.tile_reduce(wp.add, wp.tile(acc_L, preserve_type=True)), 0)
 
     P_b4_SM[group_id] = P
     L_b4_SM[group_id] = L
