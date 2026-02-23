@@ -58,6 +58,8 @@ def solve_particle_shape_contacts(
 
     if (particle_flags[particle_index] & ParticleFlags.ACTIVE) == 0:
         return
+    if (particle_flags[particle_index] & ParticleFlags.INTEGRATE_ONLY) == 2:
+        return
 
     px = particle_x[particle_index]
     pv = particle_v[particle_index]
@@ -152,6 +154,8 @@ def solve_particle_particle_contacts(
         # hash grid has not been built yet
         return
     if (particle_flags[i] & ParticleFlags.ACTIVE) == 0:
+        return
+    if (particle_flags[i] & ParticleFlags.INTEGRATE_ONLY) == 2:
         return
 
     x = particle_x[i]
