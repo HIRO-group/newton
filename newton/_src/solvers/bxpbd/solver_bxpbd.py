@@ -9,12 +9,29 @@ from .kernels import (
     apply_particle_deltas,
     solve_particle_particle_contacts,
     solve_particle_shape_contacts,
-    solve_shape_matching_batch,
+    solve_shape_matching_batch_tiled,
 )
+
+@wp.kernel
+def calculate_group_particle_mass(
+    particle_mass: wp.array(dtype=float),
+    group_particle_start: wp.array(dtype=wp.int32),
+    group_particle_count: wp.array(dtype=wp.int32),
+    group_particles_flat: wp.array(dtype=wp.int32),
+    total_group_mass: wp.array(dtype=float),
+):
+    group_id = wp.tid()
+    start_idx = group_particle_start[group_id]
+    num_particles = group_particle_count[group_id]
+    total = wp.float32(0.0)
+    for p in range(num_particles):
+        idx = group_particles_flat[start_idx + p]
+        total += particle_mass[idx]
+    total_group_mass[group_id] = total
+
 
 class SolverBXPBD(SolverBase):
     """
-    Baseline XPBD with particles.
     Similar to SolverXPBD. Only includes contact handling + shape matching constraints.
     This solver assumes complete rigid bodies. No soft bodies.
     Rigid bodies are modeled as a collection of particles.
@@ -59,10 +76,10 @@ class SolverBXPBD(SolverBase):
         self._group_particle_start = []
         self._group_particle_count = []
         self._group_particles_flat = []
-
+        self._num_dynamic_groups = 0
+        
         if model.particle_count > 0 and model.particle_group_count > 0:
             particle_offset = 0
-
             for group_id in range(model.particle_group_count):
                 group_particle_indices = model.particle_groups[group_id]
                 group_masses = model.particle_mass.numpy(
@@ -91,8 +108,26 @@ class SolverBXPBD(SolverBase):
                 self._group_particles_flat, dtype=wp.int32, device=model.device)
 
             self._num_dynamic_groups = len(self._dynamic_group_ids.numpy())
-        else:
-            self._num_dynamic_groups = 0
+
+            # Compute block_dim for tiled shape matching: cap at 256, round to warp size (32)
+            max_particles = max(self._group_particle_count.numpy())
+            self._shape_match_block_dim = min(256, int(max_particles))
+            # Round up to nearest multiple of 32 (warp size)
+            self._shape_match_block_dim = max(32, ((self._shape_match_block_dim + 31) // 32) * 32)
+
+            self.total_group_mass = wp.zeros(self._num_dynamic_groups, dtype=wp.float32, device=model.device)
+            wp.launch(
+                kernel=calculate_group_particle_mass,
+                dim=self._num_dynamic_groups,
+                inputs=[
+                    model.particle_mass,
+                    self._group_particle_start,
+                    self._group_particle_count,
+                    self._group_particles_flat,
+                ],
+                outputs=[self.total_group_mass],
+                device=model.device,
+            )
 
     def apply_particle_deltas(
         self,
@@ -223,8 +258,7 @@ class SolverBXPBD(SolverBase):
                         # Need at least 2 groups to collide
                         if model.particle_group_count > 1:
                             # Build hash grid for spatial queries
-                            model.particle_grid.build(
-                                particle_q, model.particle_max_radius)
+                            model.particle_grid.build(particle_q, model.particle_max_radius)
 
                             wp.launch(
                                 kernel=solve_particle_particle_contacts,
@@ -251,25 +285,28 @@ class SolverBXPBD(SolverBase):
                             model, state_in, state_out, particle_deltas, dt
                         )
 
-            if self._num_dynamic_groups > 0:
-                particle_deltas.zero_()
-                wp.launch(
-                    kernel=solve_shape_matching_batch,
-                    dim=self._num_dynamic_groups,
-                    inputs=[
-                        particle_q,
-                        self.particle_q_rest,
-                        model.particle_mass,
-                        self._group_particle_start,
-                        self._group_particle_count,
-                        self._group_particles_flat,
-                    ],
-                    outputs=[particle_deltas],
-                    device=model.device
-                )
-                particle_q, particle_qd = self.apply_particle_deltas(
-                    model, state_in, state_out, particle_deltas, dt
-                )
+                        if self._num_dynamic_groups > 0:                            
+                            particle_deltas.zero_()
+                            bd = self._shape_match_block_dim
+                            wp.launch(
+                                kernel=solve_shape_matching_batch_tiled,
+                                dim=(self._num_dynamic_groups, bd),
+                                inputs=[
+                                    particle_q,
+                                    self.particle_q_rest,
+                                    self.total_group_mass,
+                                    model.particle_mass,
+                                    self._group_particle_start,
+                                    self._group_particle_count,
+                                    self._group_particles_flat,
+                                    particle_deltas,
+                                ],
+                                block_dim=bd,
+                                device=model.device
+                            )
+                            particle_q, particle_qd = self.apply_particle_deltas(
+                                model, state_in, state_out, particle_deltas, dt
+                            )
 
             if model.particle_count:
                 if particle_q.ptr != state_out.particle_q.ptr:
