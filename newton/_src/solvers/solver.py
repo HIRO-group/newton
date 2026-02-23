@@ -46,6 +46,9 @@ def integrate_particles(
     inv_mass = w[tid]
     world_idx = particle_world[tid]
     world_g = gravity[wp.max(world_idx, 0)]
+    
+    if (particle_flags[tid] & ParticleFlags.INTEGRATE_ONLY) == 2:
+        world_g = wp.vec3(0.0)
 
     # simple semi-implicit Euler. v1 = v0 + a dt, x1 = x0 + v1 dt
     v1 = v0 + (f0 * inv_mass + world_g * wp.step(-inv_mass)) * dt
