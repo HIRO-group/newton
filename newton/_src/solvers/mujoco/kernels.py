@@ -22,6 +22,7 @@ from typing import Any
 import warp as wp
 
 from ...core.types import vec5
+from ...geometry import ShapeFlags
 from ...sim import ActuatorMode, EqType, JointType
 
 # Custom vector types
@@ -2023,3 +2024,194 @@ def update_pair_properties_kernel(
 
     if pair_friction_in:
         pair_friction_out[world, mjc_pair] = pair_friction_in[newton_pair]
+
+
+@wp.kernel
+def apply_integrate_only_anti_gravity_kernel(
+    mjc_body_to_newton: wp.array2d(dtype=wp.int32),
+    body_integrate_only: wp.array(dtype=wp.int32),
+    body_mass: wp.array(dtype=float),
+    gravity: wp.array(dtype=wp.vec3),
+    # outputs
+    xfrc_applied: wp.array2d(dtype=wp.spatial_vector),
+):
+    """Apply anti-gravity force to bodies flagged as INTEGRATE_ONLY.
+
+    For each MuJoCo body whose Newton body has INTEGRATE_ONLY flag,
+    adds -mass * gravity to the xfrc_applied force so that the net
+    gravitational effect on this body is zero during MuJoCo's integration.
+    """
+    world, mjc_body = wp.tid()
+    newton_body = mjc_body_to_newton[world, mjc_body]
+    if newton_body < 0:
+        return
+    if body_integrate_only[newton_body] == 0:
+        return
+
+    m = body_mass[newton_body]
+    anti_grav = -m * gravity[world]
+
+    xfrc = xfrc_applied[world, mjc_body]
+    xfrc_applied[world, mjc_body] = wp.spatial_vector(
+        wp.spatial_top(xfrc) + anti_grav,
+        wp.spatial_bottom(xfrc),
+    )
+
+
+@wp.kernel
+def save_integrate_only_body_state_kernel(
+    mjc_body_to_newton: wp.array2d(dtype=wp.int32),
+    body_integrate_only: wp.array(dtype=wp.int32),
+    qpos: wp.array2d(dtype=wp.float32),
+    qvel: wp.array2d(dtype=wp.float32),
+    mjc_body_jntadr: wp.array(dtype=wp.int32),
+    mjc_body_jntnum: wp.array(dtype=wp.int32),
+    mjc_jnt_qposadr: wp.array(dtype=wp.int32),
+    mjc_jnt_dofadr: wp.array(dtype=wp.int32),
+    mjc_jnt_type: wp.array(dtype=wp.int32),
+    # outputs
+    saved_qpos: wp.array2d(dtype=wp.float32),
+    saved_qvel: wp.array2d(dtype=wp.float32),
+):
+    """Save qpos/qvel of INTEGRATE_ONLY bodies before MuJoCo step.
+
+    Only saves free joint bodies (type == 0 in MuJoCo = mjJNT_FREE).
+    """
+    world, mjc_body = wp.tid()
+    newton_body = mjc_body_to_newton[world, mjc_body]
+    if newton_body < 0:
+        return
+    if body_integrate_only[newton_body] == 0:
+        return
+
+    njnt = mjc_body_jntnum[mjc_body]
+    if njnt != 1:
+        return
+    jnt_idx = mjc_body_jntadr[mjc_body]
+    # MuJoCo joint type 0 = mjJNT_FREE
+    if mjc_jnt_type[jnt_idx] != 0:
+        return
+
+    q_start = mjc_jnt_qposadr[jnt_idx]
+    qd_start = mjc_jnt_dofadr[jnt_idx]
+
+    # Save 7 qpos values (3 pos + 4 quat)
+    for i in range(7):
+        saved_qpos[world, q_start + i] = qpos[world, q_start + i]
+    # Save 6 qvel values (3 lin + 3 ang)
+    for i in range(6):
+        saved_qvel[world, qd_start + i] = qvel[world, qd_start + i]
+
+
+@wp.kernel
+def restore_integrate_only_body_state_kernel(
+    mjc_body_to_newton: wp.array2d(dtype=wp.int32),
+    body_integrate_only: wp.array(dtype=wp.int32),
+    saved_qpos: wp.array2d(dtype=wp.float32),
+    saved_qvel: wp.array2d(dtype=wp.float32),
+    body_f: wp.array(dtype=wp.spatial_vector),
+    mjc_body_mass: wp.array2d(dtype=float),
+    mjc_body_inertia: wp.array2d(dtype=wp.vec3),
+    mjc_body_jntadr: wp.array(dtype=wp.int32),
+    mjc_body_jntnum: wp.array(dtype=wp.int32),
+    mjc_jnt_qposadr: wp.array(dtype=wp.int32),
+    mjc_jnt_dofadr: wp.array(dtype=wp.int32),
+    mjc_jnt_type: wp.array(dtype=wp.int32),
+    dt: float,
+    # outputs
+    qpos: wp.array2d(dtype=wp.float32),
+    qvel: wp.array2d(dtype=wp.float32),
+):
+    """Restore INTEGRATE_ONLY body state after MuJoCo step.
+
+    Performs manual semi-implicit Euler integration from saved pre-step state
+    using only the externally applied forces (body_f from Newton state),
+    ignoring gravity and any collision response that MuJoCo applied.
+    """
+    world, mjc_body = wp.tid()
+    newton_body = mjc_body_to_newton[world, mjc_body]
+    if newton_body < 0:
+        return
+    if body_integrate_only[newton_body] == 0:
+        return
+
+    njnt = mjc_body_jntnum[mjc_body]
+    if njnt != 1:
+        return
+    jnt_idx = mjc_body_jntadr[mjc_body]
+    if mjc_jnt_type[jnt_idx] != 0:
+        return
+
+    q_start = mjc_jnt_qposadr[jnt_idx]
+    qd_start = mjc_jnt_dofadr[jnt_idx]
+
+    # Read saved pre-step state
+    pos = wp.vec3(
+        saved_qpos[world, q_start + 0],
+        saved_qpos[world, q_start + 1],
+        saved_qpos[world, q_start + 2],
+    )
+    rot = wp.quat(
+        saved_qpos[world, q_start + 3],
+        saved_qpos[world, q_start + 4],
+        saved_qpos[world, q_start + 5],
+        saved_qpos[world, q_start + 6],
+    )
+    # MuJoCo qvel: linear velocity of body origin (world), angular velocity (body frame)
+    v_origin = wp.vec3(
+        saved_qvel[world, qd_start + 0],
+        saved_qvel[world, qd_start + 1],
+        saved_qvel[world, qd_start + 2],
+    )
+    w_body = wp.vec3(
+        saved_qvel[world, qd_start + 3],
+        saved_qvel[world, qd_start + 4],
+        saved_qvel[world, qd_start + 5],
+    )
+
+    # Get user-applied force from Newton body_f (no anti-gravity, no collision)
+    # body_f spatial_vector: [force(3), torque(3)]
+    f = body_f[newton_body]
+    f_lin = wp.vec3(f[0], f[1], f[2])
+    f_ang = wp.vec3(f[3], f[4], f[5])
+
+    mass = mjc_body_mass[world, mjc_body]
+    inertia_diag = mjc_body_inertia[world, mjc_body]
+
+    # Semi-implicit Euler for linear velocity and position
+    inv_mass = float(0.0)
+    if mass > 0.0:
+        inv_mass = 1.0 / mass
+    v_origin_new = v_origin + f_lin * inv_mass * dt
+    pos_new = pos + v_origin_new * dt
+
+    # Semi-implicit Euler for angular velocity (in body frame)
+    # f_ang is torque in world frame, convert to body frame
+    t_body = wp.quat_rotate_inv(rot, f_ang)
+    # Euler equation: I * w_dot = t - w x (I * w)
+    Iw = wp.vec3(inertia_diag[0] * w_body[0], inertia_diag[1] * w_body[1], inertia_diag[2] * w_body[2])
+    t_eff = t_body - wp.cross(w_body, Iw)
+    inv_I = wp.vec3(0.0, 0.0, 0.0)
+    if inertia_diag[0] > 0.0:
+        inv_I = wp.vec3(1.0 / inertia_diag[0], 1.0 / inertia_diag[1], 1.0 / inertia_diag[2])
+    w_body_new = w_body + wp.cw_mul(inv_I, t_eff) * dt
+
+    # Update quaternion using angular velocity (world frame)
+    w_world_new = wp.quat_rotate(rot, w_body_new)
+    rot_new = wp.normalize(rot + wp.quat(w_world_new[0], w_world_new[1], w_world_new[2], 0.0) * rot * 0.5 * dt)
+
+    # Write back
+    qpos[world, q_start + 0] = pos_new[0]
+    qpos[world, q_start + 1] = pos_new[1]
+    qpos[world, q_start + 2] = pos_new[2]
+    qpos[world, q_start + 3] = rot_new[0]
+    qpos[world, q_start + 4] = rot_new[1]
+    qpos[world, q_start + 5] = rot_new[2]
+    qpos[world, q_start + 6] = rot_new[3]
+
+    qvel[world, qd_start + 0] = v_origin_new[0]
+    qvel[world, qd_start + 1] = v_origin_new[1]
+    qvel[world, qd_start + 2] = v_origin_new[2]
+    qvel[world, qd_start + 3] = w_body_new[0]
+    qvel[world, qd_start + 4] = w_body_new[1]
+    qvel[world, qd_start + 5] = w_body_new[2]
