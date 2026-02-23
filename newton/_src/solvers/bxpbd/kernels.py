@@ -202,10 +202,104 @@ def solve_particle_particle_contacts(
                 delta += (delta_f - delta_n) / denom
 
     wp.atomic_add(deltas, i, delta * w1 * relaxation)
-    
-    
+
+
 @wp.kernel
-def solve_shape_matching_batch(
+def solve_shape_matching_batch_tiled(
+    particle_q: wp.array(dtype=wp.vec3),
+    particle_q_rest: wp.array(dtype=wp.vec3),
+    group_mass: wp.array(dtype=float),
+    particle_mass: wp.array(dtype=float),
+    group_particle_start: wp.array(dtype=wp.int32),
+    group_particle_count: wp.array(dtype=wp.int32),
+    group_particles_flat: wp.array(dtype=wp.int32),
+    delta: wp.array(dtype=wp.vec3),
+):
+    """
+    Tile-based shape matching: one block per group.
+    Each thread strides over particles to accumulate local sums,
+    then tile_reduce cooperatively reduces across the block.
+    Supports any number of particles per group.
+    Launch with dim=(num_groups, block_dim), block_dim=block_dim.
+    """
+    group_id, lane = wp.tid()
+
+    start_idx = group_particle_start[group_id]
+    num_particles = group_particle_count[group_id]
+    M = group_mass[group_id]
+    bd = wp.block_dim()
+
+    # --- Phase 1: Each thread accumulates its strided share (com, rest com, linear momentum) ---
+    acc_mx = wp.vec3(0.0)
+    acc_mx0 = wp.vec3(0.0)
+
+    p = lane
+    while p < num_particles:
+        idx = group_particles_flat[start_idx + p]
+        m = particle_mass[idx]
+        x = particle_q[idx]
+        x0 = particle_q_rest[idx]
+        acc_mx += m * x
+        acc_mx0 += m * x0
+        p += bd
+
+    # --- Cooperative reduction across the block ---
+    t = wp.tile_extract(wp.tile_reduce(wp.add, wp.tile(acc_mx, preserve_type=True)), 0) / M
+    t0 = wp.tile_extract(wp.tile_reduce(wp.add, wp.tile(acc_mx0, preserve_type=True)), 0) / M
+
+    # --- Phase 2: Covariance matrix A (strided accumulation + tile reduce) ---
+    acc_col0 = wp.vec3(0.0)
+    acc_col1 = wp.vec3(0.0)
+    acc_col2 = wp.vec3(0.0)
+
+    p = lane
+    while p < num_particles:
+        idx = group_particles_flat[start_idx + p]
+        m = particle_mass[idx]
+        x = particle_q[idx]
+        x0 = particle_q_rest[idx]
+        pi = x - t
+        qi = x0 - t0
+        acc_col0 += pi * (qi[0] * m)
+        acc_col1 += pi * (qi[1] * m)
+        acc_col2 += pi * (qi[2] * m)
+        p += bd
+
+    sum_col0 = wp.tile_extract(wp.tile_reduce(wp.add, wp.tile(acc_col0, preserve_type=True)), 0)
+    sum_col1 = wp.tile_extract(wp.tile_reduce(wp.add, wp.tile(acc_col1, preserve_type=True)), 0)
+    sum_col2 = wp.tile_extract(wp.tile_reduce(wp.add, wp.tile(acc_col2, preserve_type=True)), 0)
+
+    A = wp.mat33(
+        sum_col0[0], sum_col1[0], sum_col2[0],
+        sum_col0[1], sum_col1[1], sum_col2[1],
+        sum_col0[2], sum_col1[2], sum_col2[2],
+    )
+
+    # --- SVD and rotation ---
+    U = wp.mat33()
+    S = wp.vec3()
+    V = wp.mat33()
+    wp.svd3(A, U, S, V)
+    R = U @ wp.transpose(V)
+
+    if wp.determinant(R) < 0.0:
+        U[:, 2] = -U[:, 2]
+        R = U @ wp.transpose(V)
+
+    # --- Phase 3: Apply deltas (each thread strides over its particles) ---
+    p = lane
+    while p < num_particles:
+        idx = group_particles_flat[start_idx + p]
+        x0 = particle_q_rest[idx]
+        x = particle_q[idx]
+        goal = R @ (x0 - t0) + t
+        dx = goal - x
+        wp.atomic_add(delta, idx, dx)
+        p += bd
+
+
+@wp.kernel
+def old_solve_shape_matching_batch(
     particle_q: wp.array(dtype=wp.vec3),
     particle_q_rest: wp.array(dtype=wp.vec3),
     particle_mass: wp.array(dtype=float),
