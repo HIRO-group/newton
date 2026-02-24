@@ -43,6 +43,7 @@ from ...utils.import_utils import string_to_warp
 from ..flags import SolverNotifyFlags
 from ..solver import SolverBase
 from .kernels import (
+    apply_integrate_only_anti_gravity_kernel,
     apply_mjc_body_f_kernel,
     apply_mjc_control_kernel,
     apply_mjc_free_joint_f_to_body_f_kernel,
@@ -56,6 +57,8 @@ from .kernels import (
     create_inverse_shape_mapping_kernel,
     eval_articulation_fk,
     repeat_array_kernel,
+    restore_integrate_only_body_state_kernel,
+    save_integrate_only_body_state_kernel,
     sync_qpos0_kernel,
     update_axis_properties_kernel,
     update_body_inertia_kernel,
@@ -2586,6 +2589,16 @@ class SolverMuJoCo(SolverBase):
         self.newton_shape_to_mjc_geom: wp.array(dtype=wp.int32) | None = None
         """Inverse mapping from Newton shape index to MuJoCo geom index. Only created when use_mujoco_contacts=False. Shape [nshape], dtype int32."""
 
+        # --- INTEGRATE_ONLY support ---
+        self.body_integrate_only: wp.array(dtype=wp.int32) | None = None
+        """Per-Newton-body flag indicating INTEGRATE_ONLY status. Shape [body_count], dtype int32."""
+        self.has_integrate_only_bodies: bool = False
+        """Whether any bodies have INTEGRATE_ONLY shapes."""
+        self._saved_qpos: wp.array | None = None
+        """Buffer for saving qpos of INTEGRATE_ONLY bodies before MuJoCo step."""
+        self._saved_qvel: wp.array | None = None
+        """Buffer for saving qvel of INTEGRATE_ONLY bodies before MuJoCo step."""
+
         # --- Helper arrays for actuator types ---
 
         # --- Internal state for mapping creation ---
@@ -2667,15 +2680,96 @@ class SolverMuJoCo(SolverBase):
                 self._update_mjc_data(self.mjw_data, self.model, state_in)
             self.mjw_model.opt.timestep.fill_(dt)
             with wp.ScopedDevice(self.model.device):
+                # INTEGRATE_ONLY: apply anti-gravity and save state before step
+                if self.has_integrate_only_bodies:
+                    self._apply_integrate_only_pre_step(dt)
+
                 if self.mjw_model.opt.run_collision_detection:
                     self._mujoco_warp_step()
                 else:
                     self._convert_contacts_to_mjwarp(self.model, state_in, contacts)
                     self._mujoco_warp_step()
 
+                # INTEGRATE_ONLY: restore state after step (manual integration, no collision response)
+                if self.has_integrate_only_bodies:
+                    self._apply_integrate_only_post_step(state_in, dt)
+
             self._update_newton_state(self.model, state_out, self.mjw_data)
         self._step += 1
         return state_out
+
+    def _apply_integrate_only_pre_step(self, dt: float):
+        """Apply anti-gravity and save state for INTEGRATE_ONLY bodies before MuJoCo step."""
+        nworld = self.mjw_data.nworld
+        nbody = self.mjc_body_to_newton.shape[1]
+
+        # Apply anti-gravity force to INTEGRATE_ONLY bodies
+        wp.launch(
+            apply_integrate_only_anti_gravity_kernel,
+            dim=(nworld, nbody),
+            inputs=[
+                self.mjc_body_to_newton,
+                self.body_integrate_only,
+                self.model.body_mass,
+                self.mjw_model.opt.gravity,
+            ],
+            outputs=[
+                self.mjw_data.xfrc_applied,
+            ],
+            device=self.model.device,
+        )
+
+        # Save qpos/qvel before MuJoCo step
+        wp.launch(
+            save_integrate_only_body_state_kernel,
+            dim=(nworld, nbody),
+            inputs=[
+                self.mjc_body_to_newton,
+                self.body_integrate_only,
+                self.mjw_data.qpos,
+                self.mjw_data.qvel,
+                self.mjw_model.body_jntadr,
+                self.mjw_model.body_jntnum,
+                self.mjw_model.jnt_qposadr,
+                self.mjw_model.jnt_dofadr,
+                self.mjw_model.jnt_type,
+            ],
+            outputs=[
+                self._saved_qpos,
+                self._saved_qvel,
+            ],
+            device=self.model.device,
+        )
+
+    def _apply_integrate_only_post_step(self, state_in: State, dt: float):
+        """Restore INTEGRATE_ONLY body state after MuJoCo step with manual integration."""
+        nworld = self.mjw_data.nworld
+        nbody = self.mjc_body_to_newton.shape[1]
+
+        wp.launch(
+            restore_integrate_only_body_state_kernel,
+            dim=(nworld, nbody),
+            inputs=[
+                self.mjc_body_to_newton,
+                self.body_integrate_only,
+                self._saved_qpos,
+                self._saved_qvel,
+                state_in.body_f,
+                self.mjw_model.body_mass,
+                self.mjw_model.body_inertia,
+                self.mjw_model.body_jntadr,
+                self.mjw_model.body_jntnum,
+                self.mjw_model.jnt_qposadr,
+                self.mjw_model.jnt_dofadr,
+                self.mjw_model.jnt_type,
+                dt,
+            ],
+            outputs=[
+                self.mjw_data.qpos,
+                self.mjw_data.qvel,
+            ],
+            device=self.model.device,
+        )
 
     def enable_rne_postconstraint(self, state_out: State):
         """Request computation of RNE forces if required for state fields."""
@@ -4499,6 +4593,30 @@ class SolverMuJoCo(SolverBase):
                 body_free_qd_start_np[body_indices] = qd_starts
 
             self.body_free_qd_start = wp.array(body_free_qd_start_np, dtype=wp.int32)
+
+            # Build per-body INTEGRATE_ONLY flag array from shape_flags
+            shape_flags_np = model.shape_flags.numpy()
+            shape_body_np = model.shape_body.numpy()
+            body_integrate_only_np = np.zeros(model.body_count, dtype=np.int32)
+            for s in range(len(shape_flags_np)):
+                if shape_flags_np[s] & int(ShapeFlags.INTEGRATE_ONLY):
+                    body_idx = shape_body_np[s]
+                    if body_idx >= 0:
+                        body_integrate_only_np[body_idx] = 1
+            # Tile across worlds
+            if model.world_count > 1 and bodies_per_world > 0:
+                template_flags = body_integrate_only_np[:bodies_per_world]
+                for w in range(1, model.world_count):
+                    body_integrate_only_np[w * bodies_per_world:(w + 1) * bodies_per_world] = template_flags
+            self.body_integrate_only = wp.array(body_integrate_only_np, dtype=wp.int32, device=model.device)
+            self.has_integrate_only_bodies = bool(np.any(body_integrate_only_np))
+
+            # Allocate save buffers for INTEGRATE_ONLY state
+            if self.has_integrate_only_bodies:
+                nq = self.mj_model.nq
+                nv = self.mj_model.nv
+                self._saved_qpos = wp.zeros((nworld, nq), dtype=wp.float32, device=model.device)
+                self._saved_qvel = wp.zeros((nworld, nv), dtype=wp.float32, device=model.device)
 
             # Create mjc_mocap_to_newton_jnt: MuJoCo[world, mocap] -> Newton joint index
             # Mocap bodies are created from fixed-base articulations (FIXED joint to world)

@@ -26,6 +26,8 @@ class ParticleFlags(IntEnum):
     """Indicates that the particle is active."""
     INACTIVE = 0 << 0
     """Indicates that the particle is inactive."""
+    INTEGRATE_ONLY = 1 << 1
+    """Indicates that the particle is only integrated (used for the rod example)"""
 
 # Shape flags
 class ShapeFlags(IntEnum):
@@ -47,6 +49,9 @@ class ShapeFlags(IntEnum):
 
     HYDROELASTIC = 1 << 4
     """Indicates that the shape uses hydroelastic collision."""
+    
+    INTEGRATE_ONLY = 1 << 5
+    """Indicates that the shape is only integrated (used for the rod example)."""
 
 
 __all__ = [
