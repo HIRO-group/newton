@@ -110,13 +110,14 @@ class SolverSRXPBD(SolverBase):
 
             self._num_dynamic_groups = len(self._dynamic_group_ids.numpy())
 
-            # Compute block_dim for tiled shape matching: cap at 256, round to warp size (32)
             max_particles = max(self._group_particle_count.numpy())
             self._shape_match_block_dim = min(256, int(max_particles))
-            # Round up to nearest multiple of 32 (warp size)
             self._shape_match_block_dim = max(32, ((self._shape_match_block_dim + 31) // 32) * 32)
 
             self.total_group_mass = wp.zeros(self._num_dynamic_groups, dtype=wp.float32, device=model.device)
+            # Pre-allocate momentum buffers to avoid per-iteration GPU allocations
+            self._linear_momentum_b4_SM = wp.zeros(self._num_dynamic_groups, dtype=wp.vec3, device=model.device)
+            self._angular_momentum_b4_SM = wp.zeros(self._num_dynamic_groups, dtype=wp.vec3, device=model.device)
             wp.launch(
                 kernel=calculate_group_particle_mass,
                 dim=self._num_dynamic_groups,
@@ -287,8 +288,8 @@ class SolverSRXPBD(SolverBase):
                         )
 
                         if self._num_dynamic_groups > 0:                            
-                            linear_momentum_b4_SM = wp.zeros(self._num_dynamic_groups, dtype=wp.vec3, device=self.model.device)
-                            angular_momentum_b4_SM = wp.zeros(self._num_dynamic_groups, dtype=wp.vec3, device=self.model.device)
+                            self._linear_momentum_b4_SM.zero_()
+                            self._angular_momentum_b4_SM.zero_()
                             particle_deltas.zero_()
                             bd = self._shape_match_block_dim
                             wp.launch(
@@ -304,8 +305,8 @@ class SolverSRXPBD(SolverBase):
                                     self._group_particle_count,
                                     self._group_particles_flat,
                                     particle_deltas,
-                                    linear_momentum_b4_SM,
-                                    angular_momentum_b4_SM,
+                                    self._linear_momentum_b4_SM,
+                                    self._angular_momentum_b4_SM,
                                 ],
                                 block_dim=bd,
                                 device=model.device
@@ -321,8 +322,8 @@ class SolverSRXPBD(SolverBase):
                                     particle_qd,
                                     self.total_group_mass,
                                     self.model.particle_mass,
-                                    linear_momentum_b4_SM,
-                                    angular_momentum_b4_SM,
+                                    self._linear_momentum_b4_SM,
+                                    self._angular_momentum_b4_SM,
                                     dt,
                                     self._group_particle_start,
                                     self._group_particle_count,
